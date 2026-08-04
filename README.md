@@ -2,9 +2,12 @@
 
 `calibre-umcp` is a Calibre automation MCP server built on Rui Carmo's [`umcp`](https://github.com/rcarmo/umcp).
 
-It is designed to run either:
+It is designed around a **plugin-first safe architecture**:
 
-- through a small Calibre plugin shim that launches the same server from inside Calibre when plugin deployment is viable.
+- a Calibre plugin runs inside the existing Calibre process and owns all live library reads/writes;
+- an optional container sidecar exposes MCP over a fixed HTTP port and delegates live operations to that plugin bridge.
+
+Direct sidecar mutation of a mounted Calibre library is deliberately not the safe default.
 
 ## Initial goals
 
@@ -17,6 +20,6 @@ It is designed to run either:
 
 ## Status
 
-Early scaffold. The first implementation wraps Calibre command-line tools (`calibredb`, `ebook-convert`, `calibre-smtp`) so it works in containers and does not require embedding into Calibre's GUI process.
+Early scaffold. The current implementation is being pivoted toward a Calibre plugin JSON-RPC bridge for live library operations. The sidecar façade refuses mutating tools unless `CALIBRE_UMCP_BRIDGE_URL` points at that plugin bridge.
 
-See [`docs/design.md`](docs/design.md) for the feasibility assessment and implementation plan.
+See [`docs/architecture.md`](docs/architecture.md) for the safe architecture and [`docs/design.md`](docs/design.md) for the initial feasibility assessment.
