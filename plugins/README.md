@@ -55,24 +55,15 @@ A GUI/container restart is still required for Calibre to load the newly installe
 
 
 ```sh
-work=/tmp/calibre-umcp-plugin-src
-rm -rf "$work"
-mkdir -p "$work"
-for f in __init__.py bridge.py ui.py; do
-done
-python3 - <<'PY'
-from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile
-work = Path('/tmp/calibre-umcp-plugin-src')
-out = Path('/tmp/calibre-umcp-plugin.zip')
-with ZipFile(out, 'w', ZIP_DEFLATED) as zf:
-    for name in ('__init__.py', 'bridge.py', 'ui.py'):
-        zf.write(work / name, name)
-print(out, out.stat().st_size)
-PY
-chown abc:users /tmp/calibre-umcp-plugin.zip
-s6-setuidgid abc calibre-customize -a /tmp/calibre-umcp-plugin.zip
+plugins/install-from-gitea.sh
 ```
+
+When copied into the Calibre container, it fetches `__init__.py`, `bridge.py`, and `ui.py` from Gitea, builds `/tmp/calibre-umcp-plugin.zip` with Python `zipfile`, and installs it with `calibre-customize`. Override these environment variables if needed:
+
+- `WORK` — default `/tmp/calibre-umcp-plugin-src`
+- `OUT` — default `/tmp/calibre-umcp-plugin.zip`
+- `CALIBRE_USER` — default `abc`
+- `CALIBRE_GROUP` — default `users`
 
 ## Runtime configuration
 
