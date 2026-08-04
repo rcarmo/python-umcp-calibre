@@ -67,7 +67,6 @@ Calibre Jobs are an operational queue/progress/log surface, not a durable struct
 - plugin directory: `/config/.config/calibre/plugins`
 - plugin installed successfully as `Calibre µMCP Bridge (0, 1, 0)` using `calibre-customize` as user `abc`.
 
-After plugin install, restart Calibre or reload the GUI so the Interface Action is loaded. Then start the `µMCP Bridge` action from the GUI.
 
 A sidecar deployment should set:
 
@@ -77,6 +76,8 @@ CALIBRE_UMCP_BRIDGE_URL=http://calibre:9000/rpc
 ```
 
 Do not grant the sidecar write access to `/books` unless a future operation explicitly requires scratch/output space and remains safe under the plugin-first model.
+
+LazyLibrarian on the media endpoint was aligned with Calibre ownership for incoming files: `PUID=1032`, `PGID=100`, `UMASK=002`, and `UMASK_SET=002`; its `/config` and `/downloads` data were chowned to `1032:100`. The shared `/books` bind mount still reports `1000:1000:777` from the host mount, so ownership there is a host-level mount concern rather than a container UID setting.
 
 ## Plugin feasibility
 

@@ -28,6 +28,8 @@ Important implementation points:
   - `GET /health`
   - `POST /rpc`
 - JSON-RPC is serialized through a bridge worker queue before touching Calibre DB state.
+- Non-loopback binds require `CALIBRE_UMCP_BRIDGE_TOKEN`; unauthorized `/rpc` requests return JSON-RPC-style error bodies.
+- UI status reports bridge version, endpoint, auth state, library path, and tracked audit job count.
 
 ## Implemented MCP/facade tools
 
@@ -110,7 +112,7 @@ Plugin added: Calibre µMCP Bridge (0, 1, 0)
 User interface action Calibre µMCP Bridge (0, 1, 0) False
 ```
 
-The Calibre GUI/container must be restarted or reloaded before the action appears.
+The Calibre GUI/container has been restarted after the latest plugin installation and the plugin still reports enabled. The bridge is not auto-started; use the `µMCP Bridge` GUI action to start it.
 
 ## Example future sidecar configuration
 
@@ -122,6 +124,7 @@ calibre-umcp:
     - CALIBRE_LIBRARIES=main=/books,articles=/books/Articles
     - CALIBRE_DEFAULT_LIBRARY=main
     - CALIBRE_UMCP_BRIDGE_URL=http://calibre:9000/rpc
+    - CALIBRE_UMCP_BRIDGE_TOKEN=<same-token-as-plugin>
 ```
 
 The exact bridge URL depends on how the Calibre plugin bridge is bound and exposed inside the Docker network. Keep the bridge loopback-only unless the sidecar/container network requires otherwise, and use `CALIBRE_UMCP_BRIDGE_TOKEN` when exposed beyond loopback.

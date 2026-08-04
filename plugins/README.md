@@ -39,17 +39,17 @@ Discovered live profile:
 - installer: `/usr/bin/calibre-customize`
 - Python: `/lsiopy/bin/python3`
 
-Live install was completed successfully from the pushed source:
+Live install was completed successfully from the pushed source and re-run after the latest bridge hardening:
 
 ```text
-/tmp/calibre-umcp-plugin.zip 4796
+/tmp/calibre-umcp-plugin.zip 5372
 Plugin added: Calibre µMCP Bridge (0, 1, 0)
 
 User interface action Calibre µMCP Bridge (0, 1, 0) False
   Expose a local JSON-RPC bridge for safe calibre-umcp live-library access.
 ```
 
-A GUI/container restart is still required for Calibre to load the newly installed Interface Action.
+The Calibre container has been restarted after installation and the plugin remains installed/enabled. The JSON-RPC bridge is not auto-started; use `µMCP Bridge → Start bridge` in the Calibre GUI.
 
 ## Installing from Gitea inside the container
 
@@ -94,6 +94,7 @@ Authentication policy:
 - default bind is `127.0.0.1`, where the token is optional for local-only use;
 - binding to `0.0.0.0`, a LAN IP, or a Docker DNS name without `CALIBRE_UMCP_BRIDGE_TOKEN` is refused at bridge startup;
 - authenticated clients must send `Authorization: Bearer <token>` to `/rpc`;
+- unauthorized `/rpc` calls return a JSON-RPC-style `401` error body with `missing or invalid bearer token`;
 - `/health` remains unauthenticated and returns only `{"ok": true}`.
 
 ## Bridge methods

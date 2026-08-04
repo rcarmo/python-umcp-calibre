@@ -35,8 +35,8 @@ Implemented and tested locally:
 - Image: `linuxserver/calibre:latest`
 - Config/profile mount: `/config`
 - Library mount: `/books`
-- Latest plugin build installed successfully with `calibre-customize` as `Calibre µMCP Bridge (0, 1, 0)` and verified to contain auth guard, RPC validation, and version wiring.
-- A Calibre GUI/container restart is required before the installed Interface Action appears in the GUI.
+- Latest plugin build installed successfully with `calibre-customize` as `Calibre µMCP Bridge (0, 1, 0)` and verified to contain auth guard, JSON auth errors, RPC validation, version wiring, and bridge thread cleanup.
+- Calibre container was restarted after installation; the plugin remains installed/enabled. The bridge itself is still started manually from the `µMCP Bridge` GUI action.
 
 ## Safety model
 
@@ -61,7 +61,7 @@ PYTHONPATH=.:src python3 -W error::ResourceWarning -m unittest discover -s tests
 sh plugins/build-plugin.sh
 ```
 
-The plugin build produces `plugins/calibre-umcp-plugin.zip`. The current suite has 22 tests covering the plugin bridge, HTTP/auth behavior, MCP facade fail-closed behavior, and plugin metadata/version consistency.
+The plugin build produces `plugins/calibre-umcp-plugin.zip`. The current suite has 22 tests covering the plugin bridge, HTTP/auth behavior, MCP facade fail-closed behavior, client error wrapping, bridge lifecycle cleanup, and plugin metadata/version consistency.
 
 ## MCP tools
 
