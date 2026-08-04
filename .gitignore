@@ -8,3 +8,4 @@ build/
 .env
 /data/
 mcpserver.log
+plugins/calibre-umcp-plugin.zip
