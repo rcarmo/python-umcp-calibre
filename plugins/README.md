@@ -1,121 +1,61 @@
-# Calibre µMCP Bridge plugin
+# Calibre µMCP plugin
 
-This directory contains the Calibre Interface Action plugin that runs inside the Calibre GUI process and exposes a small local JSON-RPC bridge for `calibre-umcp`.
+This Interface Action plugin runs a native `umcp.MCPServer` inside the Calibre GUI process. No sidecar is required.
 
-**Current scope:** live read/search/metadata methods are implemented in-process. Conversion, copy, move, and email are not implemented; those RPC names only produce fail-closed audit/job records.
-
-## Build locally
+## Build
 
 ```sh
 sh plugins/build-plugin.sh
 ```
 
-This produces `plugins/calibre-umcp-plugin.zip`. The build script removes/excludes `__pycache__` and `.pyc` files.
+The resulting `plugins/calibre-umcp-plugin.zip` contains:
 
-## Install in a Calibre profile
+- `__init__.py`
+- `ui.py`
+- `mcp.py`
+- `bridge.py`
+- `umcp.py`
+- `umcp_shared.py`
 
-Inside a Calibre container/profile, install with:
+The last two files are copied from the canonical runtime under `src/calibre_umcp` during packaging.
+
+## Install
 
 ```sh
-calibre-customize -a /path/to/calibre-umcp-plugin.zip
+s6-setuidgid abc calibre-customize -a plugins/calibre-umcp-plugin.zip
 ```
 
-For linuxserver/calibre, install as the profile owner where possible:
+Restart/reload Calibre, then select `µMCP Bridge → Start bridge`.
 
-```sh
-s6-setuidgid abc calibre-customize -a /path/to/calibre-umcp-plugin.zip
-```
+The plugin exposes:
 
-After installing, restart Calibre or reload the GUI. The plugin action appears as `µMCP Bridge` and exposes menu items to start, inspect, or stop the bridge.
+- MCP Streamable HTTP: `http://<host>:9000/mcp`
+- health: `http://<host>:9000/health`
 
-
-Discovered live profile:
-
-- container: `calibre`
-- image: `linuxserver/calibre:latest`
-- profile/config mount: `/config`
-- plugin directory: `/config/.config/calibre/plugins`
-- library mount: `/books`
-- container user: `abc` (`uid=1032`, `gid=100`)
-- helper: `/usr/bin/s6-setuidgid`
-- installer: `/usr/bin/calibre-customize`
-- Python: `/lsiopy/bin/python3`
-
-Live install was completed successfully from the pushed source and re-run after the latest bridge hardening:
-
-```text
-/tmp/calibre-umcp-plugin.zip 5372
-Plugin added: Calibre µMCP Bridge (0, 1, 0)
-
-User interface action Calibre µMCP Bridge (0, 1, 0) False
-  Expose a local JSON-RPC bridge for safe calibre-umcp live-library access.
-```
-
-The Calibre container has been restarted after installation and the plugin remains installed/enabled. The JSON-RPC bridge is not auto-started; use `µMCP Bridge → Start bridge` in the Calibre GUI.
-
-## Installing from Gitea inside the container
-
+## Install from Gitea mirror
 
 ```sh
 plugins/install-from-gitea.sh
 ```
 
-When copied into the Calibre container, it fetches `__init__.py`, `bridge.py`, and `ui.py` from Gitea, builds `/tmp/calibre-umcp-plugin.zip` with Python `zipfile`, and installs it with `calibre-customize`. Override these environment variables if needed:
+Defaults:
 
-- `WORK` — default `/tmp/calibre-umcp-plugin-src`
-- `OUT` — default `/tmp/calibre-umcp-plugin.zip`
-- `CALIBRE_USER` — default `abc`
-- `CALIBRE_GROUP` — default `users`
+- `CALIBRE_USER=abc`
+- `CALIBRE_GROUP=users`
 
-## Runtime configuration
+The installer fetches the plugin files plus the canonical µMCP runtime, creates `/tmp/calibre-umcp-plugin.zip`, and installs it with `calibre-customize`.
 
-
-```yaml
-environment:
-  - CALIBRE_UMCP_BRIDGE_HOST=0.0.0.0
-  - CALIBRE_UMCP_PORT=9000
-  - CALIBRE_UMCP_BRIDGE_TOKEN=<long-random-token>
-```
-
-Use the same token in the MCP sidecar/facade:
+## Configuration
 
 ```sh
-CALIBRE_UMCP_BRIDGE_URL=http://calibre:9000/rpc
-CALIBRE_UMCP_BRIDGE_TOKEN=<long-random-token>
+CALIBRE_UMCP_BRIDGE_HOST=127.0.0.1
+CALIBRE_UMCP_PORT=9000
+CALIBRE_UMCP_BRIDGE_TOKEN=<optional-on-loopback-required-otherwise>
+CALIBRE_UMCP_AUDIT_PATH=<optional-jsonl-path>
 ```
 
-Useful environment variables:
+For Docker/LAN access, bind `0.0.0.0` and set a long random token. MCP clients must send `Authorization: Bearer <token>`.
 
-- `CALIBRE_UMCP_PORT` — bridge port, default `9000`.
-- `CALIBRE_UMCP_BRIDGE_HOST` — bind host, default `127.0.0.1`.
-- `CALIBRE_UMCP_BRIDGE_TOKEN` — bearer token for `/rpc`. Optional only for loopback binds; required by the bridge when `CALIBRE_UMCP_BRIDGE_HOST` is not loopback.
-- `CALIBRE_UMCP_AUDIT_PATH` — optional JSONL file for bridge audit records.
+## Scope
 
-Authentication policy:
-
-- default bind is `127.0.0.1`, where the token is optional for local-only use;
-- binding to `0.0.0.0`, a LAN IP, or a Docker DNS name without `CALIBRE_UMCP_BRIDGE_TOKEN` is refused at bridge startup;
-- authenticated clients must send `Authorization: Bearer <token>` to `/rpc`;
-- unauthorized `/rpc` calls return a JSON-RPC-style `401` error body with `missing or invalid bearer token`;
-- `/health` remains unauthenticated and returns only `{"ok": true}`.
-
-## Bridge methods
-
-Implemented read/status methods:
-
-- `ping` — returns `ok`, bridge `version`, and current `library_path`
-- `list_libraries`
-- `search_books`
-- `get_book_metadata`
-- `find_duplicates`
-- `list_jobs`
-- `get_job_status`
-
-Mutating methods are recognized but deliberately rejected until implemented with Calibre's in-process job APIs:
-
-- `convert_book`
-- `copy_book`
-- `move_book`
-- `email_book`
-
-Rejected mutation attempts create bridge job/audit records, and can be persisted to JSONL via `CALIBRE_UMCP_AUDIT_PATH`.
+Implemented MCP tools are read-only: progressive discovery, status, library listing, search, metadata, duplicate detection, and audit record inspection. Conversion, copy, move, and email are deliberately not advertised until safe Calibre job mappings exist.

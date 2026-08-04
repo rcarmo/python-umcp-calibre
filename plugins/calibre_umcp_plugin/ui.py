@@ -6,7 +6,8 @@ from calibre.gui2 import error_dialog, info_dialog
 from calibre.gui2.actions import InterfaceAction
 from qt.core import QAction, QMenu
 
-from .bridge import BRIDGE_VERSION, serve_bridge
+from .bridge import BRIDGE_VERSION
+from .mcp import serve_mcp
 
 
 class CalibreUmcpAction(InterfaceAction):
@@ -62,8 +63,8 @@ class CalibreUmcpAction(InterfaceAction):
         audit_path = os.environ.get("CALIBRE_UMCP_AUDIT_PATH")
         self._auth_enabled = bool(token)
         try:
-            self._server = serve_bridge(self.gui, host, port, token=token, audit_path=audit_path)
-            self._endpoint = f"http://{host}:{port}/rpc"
+            self._server = serve_mcp(self.gui, host, port, token=token, audit_path=audit_path)
+            self._endpoint = f"http://{host}:{port}/mcp"
         except Exception as exc:
             self._server = None
             self._endpoint = None

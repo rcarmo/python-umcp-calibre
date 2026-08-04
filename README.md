@@ -1,66 +1,29 @@
-# calibre-umcp
+# python-umcp-calibre
 
-`calibre-umcp` is a Calibre automation MCP server built on Rui Carmo's [`umcp`](https://github.com/rcarmo/umcp).
+An MCP server that runs **inside Calibre** as an Interface Action plugin. It uses Rui Carmo's [`umcp`](https://github.com/rcarmo/umcp) runtime and accesses the active library through Calibre's in-process database APIs.
 
-It uses a **plugin-first safe architecture** for live Calibre libraries:
+There is no sidecar in the deployed architecture.
 
-- a Calibre Interface Action plugin runs inside the existing Calibre GUI process and owns live library access;
-- an optional sidecar/facade exposes MCP over HTTP and delegates live-library operations to the plugin JSON-RPC bridge;
-- direct sidecar mutation of a mounted Calibre library is deliberately not the safe default.
+## Implemented
 
-The bridge refuses non-loopback binds unless `CALIBRE_UMCP_BRIDGE_TOKEN` is set. Clients then authenticate to `/rpc` with `Authorization: Bearer <token>`.
+- Native µMCP Streamable HTTP endpoint: `POST /mcp`
+- Health endpoint: `GET /health`
+- Calibre GUI actions: Start, Status, Stop
+- Optional bearer authentication; mandatory for non-loopback binds
+- Serialized access to the active Calibre database
+- Progressive discovery:
+  - `capabilities_readonly`
+  - `describe_tool_readonly`
+- Read-only MCP tools:
+  - `bridge_status_readonly`
+  - `list_libraries_readonly`
+  - `search_books_readonly`
+  - `get_book_metadata_readonly`
+  - `find_duplicates_readonly`
+  - `list_bridge_jobs_readonly`
+  - `get_bridge_job_status_readonly`
 
-## Current implementation status
-
-This project is **not** a full Calibre automation plugin yet. The current shipped implementation is a safe read-only bridge plus fail-closed mutation placeholders.
-
-| Area | Status | Where it runs |
-| --- | --- | --- |
-| Calibre Interface Action plugin | Implemented | In the Calibre GUI process |
-| Manual Start / Status / Stop UI | Implemented | In the plugin |
-| HTTP `/health` and JSON-RPC `/rpc` bridge | Implemented | In the plugin |
-| Bearer-token guard for non-loopback use | Implemented | In the plugin |
-| Serialized read request dispatch | Implemented | In the plugin |
-| Live `ping`, `list_libraries`, `search_books`, `get_book_metadata`, `find_duplicates` | Implemented | In the plugin |
-| Job/audit listing for rejected mutations | Implemented | In the plugin |
-| MCP progressive discovery | Implemented | In the MCP facade, not the plugin |
-| `convert_book`, `copy_book`, `move_book_destructive`, `email_book` | **Not implemented**; recognized and rejected/audited | Facade/plugin placeholders |
-| Safe Calibre `JobManager` / `ThreadedJob` mutator mappings | **Not implemented** | Future plugin work |
-
-Implemented and tested locally:
-
-- `calibre-umcp` MCP facade with read-only tools and fail-closed mutating tools.
-- Calibre plugin package: `plugins/calibre_umcp_plugin`.
-- Plugin JSON-RPC bridge with serialized request handling, bearer-token auth, request validation, and wrapped client errors.
-- Plugin UI action: `µMCP Bridge`, with Start / Status / Stop menu actions plus version/auth/status reporting.
-- Read-only bridge operations: `ping`, `list_libraries`, `search_books`, `get_book_metadata`, and `find_duplicates`.
-- Bridge job/audit visibility: `list_jobs`, `get_job_status`, and optional JSONL audit records via `CALIBRE_UMCP_AUDIT_PATH`.
-
-Mutating operations are intentionally rejected until each one is mapped to Calibre's in-process job APIs.
-
-
-- Container: `calibre`
-- Image: `linuxserver/calibre:latest`
-- Config/profile mount: `/config`
-- Library mount: `/books`
-- Latest plugin build installed successfully with `calibre-customize` as `Calibre µMCP Bridge (0, 1, 0)` and verified to contain auth guard, JSON auth errors, RPC validation, version wiring, and bridge thread cleanup.
-- Calibre container was restarted after installation; the plugin remains installed/enabled. The bridge itself is still started manually from the `µMCP Bridge` GUI action.
-
-## Safety model
-
-The plugin is the authority for live library access. The sidecar may expose a stable MCP endpoint, but must not write directly to an open Calibre library.
-
-Mutating MCP tools fail closed unless `CALIBRE_UMCP_BRIDGE_URL` points to the plugin bridge. Even then, current mutators still reject work until their safe Calibre API mapping is implemented.
-
-## Calibre Jobs and auditing
-
-Mutating operations should use Calibre's own queueing where appropriate:
-
-- `convert_book` should reuse Calibre's existing conversion flow, which queues `ParallelJob` work through `gui.job_manager.run_job()`.
-- long-running in-process library mutations should use `calibre.gui2.threaded_jobs.ThreadedJob` and `gui.job_manager.run_threaded_job()`, with a shared `type_` and `max_concurrent_count=1` for serialized, operator-visible work.
-- device/email flows should prefer Calibre's existing GUI/device actions where they already create `DeviceJob` or conversion/email jobs.
-
-Calibre Jobs provide queue/progress/log visibility inside the running Calibre process. They are not a durable structured audit log, so the plugin bridge also keeps MCP-visible job/audit records and can append JSONL audit records.
+Conversion, copy, move, and email are not exposed as MCP tools because safe Calibre job mappings are not implemented. The older internal bridge recognizes those names only to reject and audit them.
 
 ## Build and test
 
@@ -69,31 +32,49 @@ PYTHONPATH=.:src python3 -W error::ResourceWarning -m unittest discover -s tests
 sh plugins/build-plugin.sh
 ```
 
-The plugin build produces `plugins/calibre-umcp-plugin.zip`. The current suite has 25 tests covering progressive discovery, the plugin bridge, HTTP/auth behavior, MCP facade fail-closed behavior, client error wrapping, bridge lifecycle cleanup, and plugin metadata/version consistency.
+The plugin ZIP includes `umcp.py` and `umcp_shared.py` from the canonical runtime in `src/calibre_umcp`.
 
-## MCP tools
+## Install
 
-Progressive discovery tools for low context use:
+```sh
+calibre-customize -a plugins/calibre-umcp-plugin.zip
+```
 
-- `capabilities_readonly` — compact start-here list; read-only tools only by default, optional mutating placeholders with `include_mutating=true`.
-- `describe_tool_readonly` — details for one selected tool instead of dumping all schemas/descriptions.
+For linuxserver/calibre, install as the profile owner:
 
-Read-only/live-safe tools:
+```sh
+s6-setuidgid abc calibre-customize -a plugins/calibre-umcp-plugin.zip
+```
 
-- `bridge_status_readonly`
-- `list_libraries_readonly`
-- `list_libraries` compatibility alias
-- `list_bridge_jobs_readonly`
-- `get_bridge_job_status_readonly`
-- `search_books_readonly`
-- `get_book_metadata_readonly`
-- `find_duplicates_readonly`
+Restart/reload Calibre after installation, then use `µMCP Bridge → Start bridge`.
 
-Fail-closed mutating tools:
+## Runtime configuration
 
-- `convert_book`
-- `copy_book`
-- `move_book_destructive`
-- `email_book`
+Defaults:
 
-See [`docs/architecture.md`](docs/architecture.md), [`docs/design.md`](docs/design.md), and [`plugins/README.md`](plugins/README.md) for details.
+```sh
+CALIBRE_UMCP_BRIDGE_HOST=127.0.0.1
+CALIBRE_UMCP_PORT=9000
+```
+
+For network access:
+
+```sh
+CALIBRE_UMCP_BRIDGE_HOST=0.0.0.0
+CALIBRE_UMCP_PORT=9000
+CALIBRE_UMCP_BRIDGE_TOKEN=<long-random-token>
+```
+
+Connect an MCP client to:
+
+```text
+http://<calibre-host>:9000/mcp
+```
+
+When configured, send:
+
+```text
+Authorization: Bearer <token>
+```
+
+See [`docs/architecture.md`](docs/architecture.md), [`docs/design.md`](docs/design.md), and [`plugins/README.md`](plugins/README.md).

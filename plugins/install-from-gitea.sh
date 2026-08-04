@@ -10,9 +10,14 @@ CALIBRE_GROUP=${CALIBRE_GROUP:-users}
 rm -rf "$WORK"
 mkdir -p "$WORK"
 
-for file in __init__.py bridge.py ui.py; do
+for file in __init__.py bridge.py mcp.py ui.py; do
   curl -fsSL \
     "$SOURCE_BASE/plugins/calibre_umcp_plugin/$file" \
+    -o "$WORK/$file"
+done
+for file in umcp.py umcp_shared.py; do
+  curl -fsSL \
+    "$SOURCE_BASE/src/calibre_umcp/$file" \
     -o "$WORK/$file"
 done
 
@@ -23,7 +28,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 work = Path(os.environ.get('WORK', '/tmp/calibre-umcp-plugin-src'))
 out = Path(os.environ.get('OUT', '/tmp/calibre-umcp-plugin.zip'))
 with ZipFile(out, 'w', ZIP_DEFLATED) as zf:
-    for name in ('__init__.py', 'bridge.py', 'ui.py'):
+    for name in ('__init__.py', 'bridge.py', 'mcp.py', 'ui.py', 'umcp.py', 'umcp_shared.py'):
         zf.write(work / name, name)
 print(f'{out} {out.stat().st_size}')
 PY

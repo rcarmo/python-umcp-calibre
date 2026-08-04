@@ -2030,6 +2030,7 @@ class MCPServer:
         endpoint: str = "/mcp",
         allowed_origins: list[str] | None = None,
         max_request_bytes: int = 4 * 1024 * 1024,
+        server_ready: Any | None = None,
     ) -> None:
         server_self = self
         allowed_origins = allowed_origins or []
@@ -2332,6 +2333,8 @@ class MCPServer:
             self.logger.warning("Streamable HTTP is bound beyond loopback without an authentication hook")
         httpd = ThreadingHTTPServer((host, port), _Handler); httpd.daemon_threads = True
         actual_host, actual_port = httpd.server_address[:2]
+        if server_ready is not None:
+            server_ready(httpd)
         print(f"MCP Streamable HTTP Server listening on http://{actual_host}:{actual_port}{endpoint}", flush=True)
         httpd.serve_forever()
 
