@@ -7,12 +7,17 @@ import time
 import uuid
 from ipaddress import ip_address
 from pathlib import Path
+
+try:
+    from . import PLUGIN_VERSION_STRING
+except ImportError:  # Calibre loads plugin modules under calibre_plugins.*
+    from calibre_plugins.calibre_umcp_plugin import PLUGIN_VERSION_STRING
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
 
-BRIDGE_VERSION = "0.1.0"
+BRIDGE_VERSION = PLUGIN_VERSION_STRING
 
 
 class BridgeMethodError(RuntimeError):
