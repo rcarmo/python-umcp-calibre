@@ -212,8 +212,18 @@ def serve_bridge(gui, host: str, port: int, token: str | None = None, audit_path
             try:
                 length = int(self.headers.get("content-length") or "0")
                 payload = json.loads(self.rfile.read(length).decode())
+                if not isinstance(payload, dict):
+                    raise BridgeMethodError("JSON-RPC request must be an object")
                 request_id = payload.get("id")
-                result = bridge.call_serialized(str(payload.get("method") or ""), payload.get("params") or {})
+                method = payload.get("method")
+                params = payload.get("params", {})
+                if params is None:
+                    params = {}
+                if not isinstance(method, str) or not method:
+                    raise BridgeMethodError("JSON-RPC method must be a non-empty string")
+                if not isinstance(params, dict):
+                    raise BridgeMethodError("JSON-RPC params must be an object")
+                result = bridge.call_serialized(method, params)
                 body = {"jsonrpc": "2.0", "id": request_id, "result": result}
                 self._write_json(200, body)
             except Exception as exc:

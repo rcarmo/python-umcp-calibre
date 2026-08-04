@@ -37,14 +37,27 @@ class BridgeHttpTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(json.loads(response.read().decode()), {"ok": True})
 
-    def test_rpc_preserves_request_id_on_error(self):
-        base = self.start_server()
-        body = json.dumps({"jsonrpc": "2.0", "id": "abc", "method": "missing", "params": {}}).encode()
+    def rpc(self, base, payload):
+        body = json.dumps(payload).encode()
         request = urllib.request.Request(f"{base}/rpc", data=body, headers={"content-type": "application/json"}, method="POST")
         with urllib.request.urlopen(request, timeout=5) as response:
-            payload = json.loads(response.read().decode())
+            return json.loads(response.read().decode())
+
+    def test_rpc_preserves_request_id_on_error(self):
+        base = self.start_server()
+        payload = self.rpc(base, {"jsonrpc": "2.0", "id": "abc", "method": "missing", "params": {}})
         self.assertEqual(payload["id"], "abc")
         self.assertIn("error", payload)
+
+    def test_rpc_validates_request_shape(self):
+        base = self.start_server()
+        missing_method = self.rpc(base, {"jsonrpc": "2.0", "id": "missing-method", "params": {}})
+        self.assertEqual(missing_method["id"], "missing-method")
+        self.assertIn("non-empty string", missing_method["error"]["message"])
+
+        bad_params = self.rpc(base, {"jsonrpc": "2.0", "id": "bad-params", "method": "ping", "params": []})
+        self.assertEqual(bad_params["id"], "bad-params")
+        self.assertIn("params must be an object", bad_params["error"]["message"])
 
     def test_rpc_requires_bearer_token_when_configured(self):
         base = self.start_server(token="secret")
