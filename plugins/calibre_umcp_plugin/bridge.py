@@ -11,6 +11,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 
+BRIDGE_VERSION = "0.1.0"
+
+
 class BridgeMethodError(RuntimeError):
     pass
 
@@ -49,7 +52,7 @@ class CalibreRpcBridge:
 
     def dispatch(self, method: str, params: dict[str, Any]) -> Any:
         if method == "ping":
-            return {"ok": True, "library_path": self._library_path()}
+            return {"ok": True, "version": BRIDGE_VERSION, "library_path": self._library_path()}
         if method == "list_libraries":
             return self._list_libraries()
         if method == "search_books":

@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from plugins.calibre_umcp_plugin.bridge import BridgeMethodError, CalibreRpcBridge
+from plugins.calibre_umcp_plugin.bridge import BRIDGE_VERSION, BridgeMethodError, CalibreRpcBridge
 
 
 class FakeMetadata:
@@ -52,6 +52,10 @@ class FakeGui:
 
 
 class CalibreRpcBridgeTests(unittest.TestCase):
+    def test_bridge_ping_reports_version_and_current_library(self):
+        bridge = CalibreRpcBridge(FakeGui())
+        self.assertEqual(bridge.dispatch("ping", {}), {"ok": True, "version": BRIDGE_VERSION, "library_path": "/books"})
+
     def test_bridge_searches_current_library(self):
         bridge = CalibreRpcBridge(FakeGui())
         rows = bridge.dispatch("search_books", {"query": "Example", "limit": 10})

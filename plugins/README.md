@@ -87,7 +87,7 @@ Useful environment variables:
 
 Implemented read/status methods:
 
-- `ping`
+- `ping` — returns `ok`, bridge `version`, and current `library_path`
 - `list_libraries`
 - `search_books`
 - `get_book_metadata`
