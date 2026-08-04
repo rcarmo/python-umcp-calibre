@@ -9,6 +9,16 @@ It is designed around a **plugin-first safe architecture**:
 
 Direct sidecar mutation of a mounted Calibre library is deliberately not the safe default.
 
+## Calibre Jobs and auditing
+
+Mutating operations are intentionally fail-closed until each one is mapped to Calibre's in-process APIs:
+
+- `convert_book` should reuse Calibre's existing conversion flow, which queues `ParallelJob` work through `gui.job_manager.run_job()`.
+- long-running in-process library mutations should be wrapped in `calibre.gui2.threaded_jobs.ThreadedJob` and queued with `gui.job_manager.run_threaded_job()`, using a shared `type_` and `max_concurrent_count=1` for serialized, operator-visible work.
+- device/email flows should prefer Calibre's existing GUI/device actions where they already create `DeviceJob` or conversion/email jobs.
+
+Calibre Jobs provide queue/progress/log visibility inside the running Calibre process. They are not a durable structured audit log, so the plugin bridge keeps a small JSON-serializable job/audit scaffold for MCP-visible status and future JSONL audit persistence.
+
 ## Initial goals
 
 - Manage one or more Calibre libraries.

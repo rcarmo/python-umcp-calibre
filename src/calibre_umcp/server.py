@@ -16,9 +16,24 @@ class CalibreMCPServer(MCPServer):
         self.calibre = CalibreCLI(load_config())
         self.bridge = CalibreBridgeClient()
 
-    def tool_list_libraries(self) -> dict[str, str]:
+    def tool_bridge_status_readonly(self) -> dict[str, Any]:
+        """Report whether the safe in-process Calibre plugin bridge is configured and reachable."""
+        if not self.bridge.enabled:
+            return {"enabled": False, "reachable": False, "message": "CALIBRE_UMCP_BRIDGE_URL is not set"}
+        try:
+            return {"enabled": True, "reachable": True, "status": self.bridge.call("ping")}
+        except Exception as exc:
+            return {"enabled": True, "reachable": False, "error": str(exc)}
+
+    def tool_list_libraries_readonly(self) -> dict[str, str]:
         """List configured Calibre libraries."""
+        if self.bridge.enabled:
+            return self.bridge.call("list_libraries")
         return {name: str(lib.path) for name, lib in self.calibre.config.libraries.items()}
+
+    def tool_list_libraries(self) -> dict[str, str]:
+        """Backward-compatible alias for older MCP clients."""
+        return self.tool_list_libraries_readonly()
 
     def tool_search_books_readonly(self, query: str = "", library: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         """Search/list books in a Calibre library."""

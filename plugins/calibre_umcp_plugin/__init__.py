@@ -1,4 +1,8 @@
-from calibre.customize import InterfaceActionBase
+try:
+    from calibre.customize import InterfaceActionBase
+except ImportError:  # Allows unit tests to import bridge modules outside Calibre.
+    class InterfaceActionBase:  # type: ignore[no-redef]
+        pass
 
 
 class CalibreUmcpPlugin(InterfaceActionBase):
