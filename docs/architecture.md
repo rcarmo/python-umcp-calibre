@@ -10,30 +10,73 @@ The safe architecture is **plugin-first**.
 ```text
 MCP client
   ↓ Streamable HTTP /mcp
-calibre-umcp façade, optional sidecar
-  ↓ local HTTP JSON-RPC, authenticated/shared LAN only
-Calibre µMCP Bridge plugin, inside Calibre process
-  ↓ Calibre GUI/database APIs, serialized by plugin worker
+calibre-umcp facade, optional sidecar
+  ↓ local HTTP JSON-RPC, optional bearer token
+Calibre µMCP Bridge plugin, inside Calibre GUI process
+  ↓ Calibre GUI/database APIs, serialized bridge worker and Calibre jobs where appropriate
 active Calibre library/database/files
 ```
 
-The plugin is the authority for all library mutation. The sidecar is allowed to expose MCP on a fixed port and provide a stable network endpoint, but it delegates any operation that reads or mutates a live Calibre library to the plugin bridge.
+The plugin is the authority for live library reads and all future writes. The sidecar is allowed to expose MCP on a fixed port and provide a stable network endpoint, but it delegates live-library operations to the plugin bridge.
 
 ## Safety rules
 
 1. The plugin owns all writes to an open Calibre library.
 2. Sidecar direct `calibredb` mode is read-only by default.
 3. Mutating tools fail closed unless `CALIBRE_UMCP_BRIDGE_URL` points to a plugin bridge.
-4. The plugin serializes operations through one queue/worker.
-5. Initial bridge binds to `127.0.0.1` inside the Calibre container unless explicitly configured.
+4. Current mutating bridge methods still reject work until implemented through Calibre's in-process APIs.
+5. HTTP handler concurrency is serialized through the bridge worker before touching Calibre state.
+6. Long-running mutations should be queued through Calibre `JobManager` / `ThreadedJob` APIs for operator-visible progress and logs.
+7. The bridge binds to `127.0.0.1` by default unless `CALIBRE_UMCP_BRIDGE_HOST` is explicitly configured.
+8. Use `CALIBRE_UMCP_BRIDGE_TOKEN` when exposing the bridge beyond loopback.
+
+## Bridge API
+
+Implemented JSON-RPC methods:
+
+- `ping`
+- `list_libraries`
+- `search_books`
+- `get_book_metadata`
+- `find_duplicates`
+- `list_jobs`
+- `get_job_status`
+
+Known mutating method names are recognized but rejected with an audit/job record:
+
+- `convert_book`
+- `copy_book`
+- `move_book`
+- `email_book`
+
+## Calibre Jobs mapping
+
+Planned safe mappings for mutators:
+
+- Conversion: reuse Calibre's existing conversion path, which queues `ParallelJob` instances through `gui.job_manager.run_job()`.
+- Generic long-running in-process mutations: create `calibre.gui2.threaded_jobs.ThreadedJob` instances and enqueue them with `gui.job_manager.run_threaded_job()`, using `type_="umcp-bridge"` and `max_concurrent_count=1`.
+- Device/email flows: prefer existing GUI/device APIs where Calibre already creates `DeviceJob` or conversion/email jobs.
+
+Calibre Jobs are an operational queue/progress/log surface, not a durable structured audit log. The bridge therefore keeps MCP-visible job records and can append JSONL records via `CALIBRE_UMCP_AUDIT_PATH`.
 
 
 
-- install the plugin in the `linuxserver/calibre` container/profile;
-- have the plugin listen on an internal port, e.g. `127.0.0.1:9100` or a compose-only bridge network address;
-- run `calibre-umcp` on exposed port `9000` with `CALIBRE_UMCP_BRIDGE_URL=http://calibre:9100/rpc`;
-- do not grant the sidecar write access to `/books` unless needed for conversion scratch space.
+- container: `calibre`
+- image: `linuxserver/calibre:latest`
+- plugin directory: `/config/.config/calibre/plugins`
+- plugin installed successfully as `Calibre µMCP Bridge (0, 1, 0)` using `calibre-customize` as user `abc`.
+
+After plugin install, restart Calibre or reload the GUI so the Interface Action is loaded. Then start the `µMCP Bridge` action from the GUI.
+
+A sidecar deployment should set:
+
+```sh
+CALIBRE_UMCP_BRIDGE_URL=http://calibre:9000/rpc
+# or whichever bridge host/port is reachable from the sidecar network
+```
+
+Do not grant the sidecar write access to `/books` unless a future operation explicitly requires scratch/output space and remains safe under the plugin-first model.
 
 ## Plugin feasibility
 
-Calibre supports Python Interface Action plugins. Those plugins run in the Calibre GUI process and can access the active database object via Calibre APIs. That is the correct place to manipulate the active library safely, rather than editing `metadata.db` from a second process.
+Calibre Interface Action plugins run in the Calibre GUI process and can access the active database object via Calibre APIs. That is the correct place to manipulate the active library safely, rather than editing `metadata.db` from a second process.

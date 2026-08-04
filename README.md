@@ -2,34 +2,83 @@
 
 `calibre-umcp` is a Calibre automation MCP server built on Rui Carmo's [`umcp`](https://github.com/rcarmo/umcp).
 
-It is designed around a **plugin-first safe architecture**:
+It uses a **plugin-first safe architecture** for live Calibre libraries:
 
-- a Calibre plugin runs inside the existing Calibre process and owns all live library reads/writes;
-- an optional container sidecar exposes MCP over a fixed HTTP port and delegates live operations to that plugin bridge.
+- a Calibre Interface Action plugin runs inside the existing Calibre GUI process and owns live library access;
+- an optional sidecar/facade exposes MCP over HTTP and delegates live-library operations to the plugin JSON-RPC bridge;
+- direct sidecar mutation of a mounted Calibre library is deliberately not the safe default.
 
-Direct sidecar mutation of a mounted Calibre library is deliberately not the safe default.
+## Current status
+
+Implemented and tested locally:
+
+- `calibre-umcp` MCP facade with read-only tools and fail-closed mutating tools.
+- Calibre plugin package: `plugins/calibre_umcp_plugin`.
+- Plugin JSON-RPC bridge with serialized request handling.
+- Plugin UI action: `µMCP Bridge`, with Start / Status / Stop menu actions.
+- Read-only bridge operations:
+  - `ping`
+  - `list_libraries`
+  - `search_books`
+  - `get_book_metadata`
+  - `find_duplicates`
+- Bridge job/audit visibility:
+  - `list_jobs`
+  - `get_job_status`
+  - optional JSONL audit records via `CALIBRE_UMCP_AUDIT_PATH`
+- Mutating operations are intentionally rejected until each one is mapped to Calibre's in-process job APIs.
+
+
+- Container: `calibre`
+- Image: `linuxserver/calibre:latest`
+- Config/profile mount: `/config`
+- Library mount: `/books`
+- Plugin installed successfully with `calibre-customize` as `Calibre µMCP Bridge (0, 1, 0)`.
+- A Calibre GUI/container restart is required before the installed Interface Action appears in the GUI.
+
+## Safety model
+
+The plugin is the authority for live library access. The sidecar may expose a stable MCP endpoint, but must not write directly to an open Calibre library.
+
+Mutating MCP tools fail closed unless `CALIBRE_UMCP_BRIDGE_URL` points to the plugin bridge. Even then, current mutators still reject work until their safe Calibre API mapping is implemented.
 
 ## Calibre Jobs and auditing
 
-Mutating operations are intentionally fail-closed until each one is mapped to Calibre's in-process APIs:
+Mutating operations should use Calibre's own queueing where appropriate:
 
 - `convert_book` should reuse Calibre's existing conversion flow, which queues `ParallelJob` work through `gui.job_manager.run_job()`.
-- long-running in-process library mutations should be wrapped in `calibre.gui2.threaded_jobs.ThreadedJob` and queued with `gui.job_manager.run_threaded_job()`, using a shared `type_` and `max_concurrent_count=1` for serialized, operator-visible work.
+- long-running in-process library mutations should use `calibre.gui2.threaded_jobs.ThreadedJob` and `gui.job_manager.run_threaded_job()`, with a shared `type_` and `max_concurrent_count=1` for serialized, operator-visible work.
 - device/email flows should prefer Calibre's existing GUI/device actions where they already create `DeviceJob` or conversion/email jobs.
 
-Calibre Jobs provide queue/progress/log visibility inside the running Calibre process. They are not a durable structured audit log, so the plugin bridge keeps a small JSON-serializable job/audit scaffold for MCP-visible status and future JSONL audit persistence.
+Calibre Jobs provide queue/progress/log visibility inside the running Calibre process. They are not a durable structured audit log, so the plugin bridge also keeps MCP-visible job/audit records and can append JSONL audit records.
 
-## Initial goals
+## Build and test
 
-- Manage one or more Calibre libraries.
-- Detect duplicates by title/author/identifier/file hash heuristics.
-- Convert books through `ebook-convert`.
-- Email books through Calibre's `calibre-smtp` or configured SMTP.
-- Copy/move books between libraries through `calibredb`.
-- Expose all operations as MCP tools using `umcp`.
+```sh
+PYTHONPATH=.:src python3 -m unittest discover -s tests -v
+sh plugins/build-plugin.sh
+```
 
-## Status
+The plugin build produces `plugins/calibre-umcp-plugin.zip`.
 
-Early scaffold. The current implementation is being pivoted toward a Calibre plugin JSON-RPC bridge for live library operations. The sidecar façade refuses mutating tools unless `CALIBRE_UMCP_BRIDGE_URL` points at that plugin bridge.
+## MCP tools
 
-See [`docs/architecture.md`](docs/architecture.md) for the safe architecture and [`docs/design.md`](docs/design.md) for the initial feasibility assessment.
+Read-only/live-safe tools:
+
+- `bridge_status_readonly`
+- `list_libraries_readonly`
+- `list_libraries` compatibility alias
+- `list_bridge_jobs_readonly`
+- `get_bridge_job_status_readonly`
+- `search_books_readonly`
+- `get_book_metadata_readonly`
+- `find_duplicates_readonly`
+
+Fail-closed mutating tools:
+
+- `convert_book`
+- `copy_book`
+- `move_book_destructive`
+- `email_book`
+
+See [`docs/architecture.md`](docs/architecture.md), [`docs/design.md`](docs/design.md), and [`plugins/README.md`](plugins/README.md) for details.
