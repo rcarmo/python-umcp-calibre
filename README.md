@@ -16,8 +16,8 @@ Implemented and tested locally:
 
 - `calibre-umcp` MCP facade with read-only tools and fail-closed mutating tools.
 - Calibre plugin package: `plugins/calibre_umcp_plugin`.
-- Plugin JSON-RPC bridge with serialized request handling.
-- Plugin UI action: `µMCP Bridge`, with Start / Status / Stop menu actions.
+- Plugin JSON-RPC bridge with serialized request handling, bearer-token auth, request validation, and wrapped client errors.
+- Plugin UI action: `µMCP Bridge`, with Start / Status / Stop menu actions plus version/auth/status reporting.
 - Read-only bridge operations:
   - `ping`
   - `list_libraries`
@@ -35,7 +35,7 @@ Implemented and tested locally:
 - Image: `linuxserver/calibre:latest`
 - Config/profile mount: `/config`
 - Library mount: `/books`
-- Plugin installed successfully with `calibre-customize` as `Calibre µMCP Bridge (0, 1, 0)`.
+- Latest plugin build installed successfully with `calibre-customize` as `Calibre µMCP Bridge (0, 1, 0)` and verified to contain auth guard, RPC validation, and version wiring.
 - A Calibre GUI/container restart is required before the installed Interface Action appears in the GUI.
 
 ## Safety model
@@ -57,11 +57,11 @@ Calibre Jobs provide queue/progress/log visibility inside the running Calibre pr
 ## Build and test
 
 ```sh
-PYTHONPATH=.:src python3 -m unittest discover -s tests -v
+PYTHONPATH=.:src python3 -W error::ResourceWarning -m unittest discover -s tests -v
 sh plugins/build-plugin.sh
 ```
 
-The plugin build produces `plugins/calibre-umcp-plugin.zip`.
+The plugin build produces `plugins/calibre-umcp-plugin.zip`. The current suite has 22 tests covering the plugin bridge, HTTP/auth behavior, MCP facade fail-closed behavior, and plugin metadata/version consistency.
 
 ## MCP tools
 
