@@ -1,4 +1,6 @@
+import io
 import json
+import urllib.error
 import unittest
 from unittest.mock import patch
 
@@ -48,6 +50,30 @@ class BridgeClientTests(unittest.TestCase):
         with patch("urllib.request.urlopen", fake_urlopen):
             with self.assertRaises(BridgeError):
                 client.call("missing")
+
+    def test_wraps_http_errors(self):
+        def fake_urlopen(request, timeout):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                401,
+                "Unauthorized",
+                hdrs=None,
+                fp=io.BytesIO(b"missing bearer token"),
+            )
+
+        client = CalibreBridgeClient("http://127.0.0.1:9000/rpc")
+        with patch("urllib.request.urlopen", fake_urlopen):
+            with self.assertRaisesRegex(BridgeError, "HTTP 401.*missing bearer token"):
+                client.call("ping")
+
+    def test_wraps_unreachable_bridge_errors(self):
+        def fake_urlopen(request, timeout):
+            raise urllib.error.URLError("connection refused")
+
+        client = CalibreBridgeClient("http://127.0.0.1:9000/rpc")
+        with patch("urllib.request.urlopen", fake_urlopen):
+            with self.assertRaisesRegex(BridgeError, "unreachable.*connection refused"):
+                client.call("ping")
 
 
 if __name__ == "__main__":
