@@ -60,7 +60,7 @@ from inspect import (
 )
 import math
 from json import JSONDecodeError, dumps, loads as _json_loads
-from logging import INFO, FileHandler, basicConfig, getLogger
+from logging import INFO, FileHandler, NullHandler, basicConfig, getLogger
 from pathlib import Path
 from .umcp_shared import (
     MCPCancellationState,
@@ -168,6 +168,11 @@ class MCPServer:
 
     def _setup_logging(self) -> None:
         """Set up logging configuration."""
+        self.logger = getLogger(__name__)
+        if _os.environ.get("CALIBRE_UMCP_DRY_RUN") == "1":
+            if not self.logger.handlers:
+                self.logger.addHandler(NullHandler())
+            return
         self.log_file.parent.mkdir(exist_ok=True)
         basicConfig(
             level=INFO,
@@ -177,7 +182,6 @@ class MCPServer:
                 FileHandler(self.log_file),
             ]
         )
-        self.logger = getLogger(__name__)
 
     def get_config(self) -> dict[str, Any]:
         """Generate server configuration dynamically."""
