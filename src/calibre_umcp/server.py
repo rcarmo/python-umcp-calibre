@@ -53,3 +53,9 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# Explicit MCP annotation override: moving between libraries removes the source copy.
+CalibreMCPServer.tool_move_book_destructive._mcp_annotations = {  # type: ignore[attr-defined]
+    "readOnlyHint": False,
+    "destructiveHint": True,
+}
