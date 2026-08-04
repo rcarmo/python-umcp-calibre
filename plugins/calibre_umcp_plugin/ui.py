@@ -6,7 +6,7 @@ from calibre.gui2 import error_dialog, info_dialog
 from calibre.gui2.actions import InterfaceAction
 from qt.core import QAction, QMenu
 
-from .bridge import serve_bridge
+from .bridge import BRIDGE_VERSION, serve_bridge
 
 
 class CalibreUmcpAction(InterfaceAction):
@@ -16,6 +16,7 @@ class CalibreUmcpAction(InterfaceAction):
     def genesis(self):
         self._server = None
         self._endpoint = None
+        self._auth_enabled = False
 
         self.menu = QMenu(self.gui)
         self.start_action = QAction("Start bridge", self.gui)
@@ -59,12 +60,14 @@ class CalibreUmcpAction(InterfaceAction):
         host = os.environ.get("CALIBRE_UMCP_BRIDGE_HOST", "127.0.0.1")
         token = os.environ.get("CALIBRE_UMCP_BRIDGE_TOKEN")
         audit_path = os.environ.get("CALIBRE_UMCP_AUDIT_PATH")
+        self._auth_enabled = bool(token)
         try:
             self._server = serve_bridge(self.gui, host, port, token=token, audit_path=audit_path)
             self._endpoint = f"http://{host}:{port}/rpc"
         except Exception as exc:
             self._server = None
             self._endpoint = None
+            self._auth_enabled = False
             error_dialog(self.gui, "Calibre µMCP Bridge", f"Failed to start bridge: {exc}", show=True)
             return
 
@@ -72,7 +75,7 @@ class CalibreUmcpAction(InterfaceAction):
         info_dialog(
             self.gui,
             "Calibre µMCP Bridge",
-            f"Bridge listening on {self._endpoint}\nLibrary: {library_path}",
+            f"Bridge {BRIDGE_VERSION} listening on {self._endpoint}\nAuth: {'enabled' if self._auth_enabled else 'disabled'}\nLibrary: {library_path}",
             show=True,
         )
 
@@ -86,7 +89,7 @@ class CalibreUmcpAction(InterfaceAction):
         info_dialog(
             self.gui,
             "Calibre µMCP Bridge",
-            f"Bridge is running.\nEndpoint: {self._endpoint}\nLibrary: {library_path}\nTracked audit jobs: {job_count}",
+            f"Bridge {BRIDGE_VERSION} is running.\nEndpoint: {self._endpoint}\nAuth: {'enabled' if self._auth_enabled else 'disabled'}\nLibrary: {library_path}\nTracked audit jobs: {job_count}",
             show=True,
         )
 
@@ -100,6 +103,7 @@ class CalibreUmcpAction(InterfaceAction):
         finally:
             self._server = None
             self._endpoint = None
+            self._auth_enabled = False
             self._refresh_actions()
         info_dialog(self.gui, "Calibre µMCP Bridge", "Bridge stopped.", show=True)
 
@@ -109,3 +113,4 @@ class CalibreUmcpAction(InterfaceAction):
             self._server.server_close()
             self._server = None
             self._endpoint = None
+            self._auth_enabled = False
