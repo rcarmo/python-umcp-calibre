@@ -67,6 +67,21 @@ When copied into the Calibre container, it fetches `__init__.py`, `bridge.py`, a
 
 ## Runtime configuration
 
+
+```yaml
+environment:
+  - CALIBRE_UMCP_BRIDGE_HOST=0.0.0.0
+  - CALIBRE_UMCP_PORT=9000
+  - CALIBRE_UMCP_BRIDGE_TOKEN=<long-random-token>
+```
+
+Use the same token in the MCP sidecar/facade:
+
+```sh
+CALIBRE_UMCP_BRIDGE_URL=http://calibre:9000/rpc
+CALIBRE_UMCP_BRIDGE_TOKEN=<long-random-token>
+```
+
 Useful environment variables:
 
 - `CALIBRE_UMCP_PORT` — bridge port, default `9000`.
