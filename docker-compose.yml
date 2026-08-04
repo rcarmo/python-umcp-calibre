@@ -1,0 +1,13 @@
+services:
+  calibre-umcp:
+    build: .
+    image: calibre-umcp:local
+    container_name: calibre-umcp
+    restart: unless-stopped
+    environment:
+      - CALIBRE_LIBRARIES=main=/books,articles=/books/Articles
+      - CALIBRE_DEFAULT_LIBRARY=main
+    ports:
+      - "9000:9000"
+    volumes:
+      - ${CALIBRE_LIBRARY_PATH:-./books}:/books

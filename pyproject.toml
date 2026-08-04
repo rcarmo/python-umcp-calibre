@@ -1,0 +1,15 @@
+[project]
+name = "calibre-umcp"
+version = "0.1.0"
+description = "Calibre automation MCP server using rcarmo/umcp"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Rui Carmo", email = "rui.carmo@gmail.com" }]
+dependencies = []
+
+[project.scripts]
+calibre-umcp = "calibre_umcp.server:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
