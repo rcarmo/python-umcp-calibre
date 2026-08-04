@@ -2,6 +2,8 @@
 
 This directory contains the Calibre Interface Action plugin that runs inside the Calibre GUI process and exposes a small local JSON-RPC bridge for `calibre-umcp`.
 
+**Current scope:** live read/search/metadata methods are implemented in-process. Conversion, copy, move, and email are not implemented; those RPC names only produce fail-closed audit/job records.
+
 ## Build locally
 
 ```sh

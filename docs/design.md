@@ -10,6 +10,20 @@ The project started with a sidecar-first idea, but the safe implementation is no
 
 This avoids direct external mutation of an open Calibre library while still allowing a stable MCP endpoint.
 
+## What is actually implemented
+
+| Capability | Implemented? | Notes |
+| --- | --- | --- |
+| Interface Action plugin loaded by Calibre | Yes | `plugins/calibre_umcp_plugin` |
+| Manual bridge controls in the Calibre GUI | Yes | Start / Status / Stop actions |
+| HTTP bridge inside Calibre process | Yes | `/health` and `/rpc` |
+| Token-protected non-loopback bridge | Yes | non-loopback bind requires `CALIBRE_UMCP_BRIDGE_TOKEN` |
+| Live read-only metadata operations | Yes | `ping`, library listing, search, metadata, duplicate scan |
+| MCP progressive discovery | Yes | implemented in `src/calibre_umcp/server.py`, not in the plugin |
+| Mutation job/audit records | Partial | rejected mutations are recorded/audited |
+| Actual conversion/copy/move/email execution | No | placeholders deliberately fail closed |
+| Calibre `JobManager` / `ThreadedJob` integration | No | design target for future mutators |
+
 ## Implemented plugin
 
 The plugin lives under `plugins/calibre_umcp_plugin` and is packaged with:
@@ -79,7 +93,7 @@ Rejected-but-audited bridge methods:
 
 Rejected mutation attempts create in-memory job records and can append JSONL records when `CALIBRE_UMCP_AUDIT_PATH` is set.
 
-## Calibre Jobs plan
+## Calibre Jobs plan, not yet implemented
 
 Calibre's job infrastructure should be used for mutators instead of creating an unrelated queue:
 

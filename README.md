@@ -10,7 +10,22 @@ It uses a **plugin-first safe architecture** for live Calibre libraries:
 
 The bridge refuses non-loopback binds unless `CALIBRE_UMCP_BRIDGE_TOKEN` is set. Clients then authenticate to `/rpc` with `Authorization: Bearer <token>`.
 
-## Current status
+## Current implementation status
+
+This project is **not** a full Calibre automation plugin yet. The current shipped implementation is a safe read-only bridge plus fail-closed mutation placeholders.
+
+| Area | Status | Where it runs |
+| --- | --- | --- |
+| Calibre Interface Action plugin | Implemented | In the Calibre GUI process |
+| Manual Start / Status / Stop UI | Implemented | In the plugin |
+| HTTP `/health` and JSON-RPC `/rpc` bridge | Implemented | In the plugin |
+| Bearer-token guard for non-loopback use | Implemented | In the plugin |
+| Serialized read request dispatch | Implemented | In the plugin |
+| Live `ping`, `list_libraries`, `search_books`, `get_book_metadata`, `find_duplicates` | Implemented | In the plugin |
+| Job/audit listing for rejected mutations | Implemented | In the plugin |
+| MCP progressive discovery | Implemented | In the MCP facade, not the plugin |
+| `convert_book`, `copy_book`, `move_book_destructive`, `email_book` | **Not implemented**; recognized and rejected/audited | Facade/plugin placeholders |
+| Safe Calibre `JobManager` / `ThreadedJob` mutator mappings | **Not implemented** | Future plugin work |
 
 Implemented and tested locally:
 
@@ -18,17 +33,10 @@ Implemented and tested locally:
 - Calibre plugin package: `plugins/calibre_umcp_plugin`.
 - Plugin JSON-RPC bridge with serialized request handling, bearer-token auth, request validation, and wrapped client errors.
 - Plugin UI action: `µMCP Bridge`, with Start / Status / Stop menu actions plus version/auth/status reporting.
-- Read-only bridge operations:
-  - `ping`
-  - `list_libraries`
-  - `search_books`
-  - `get_book_metadata`
-  - `find_duplicates`
-- Bridge job/audit visibility:
-  - `list_jobs`
-  - `get_job_status`
-  - optional JSONL audit records via `CALIBRE_UMCP_AUDIT_PATH`
-- Mutating operations are intentionally rejected until each one is mapped to Calibre's in-process job APIs.
+- Read-only bridge operations: `ping`, `list_libraries`, `search_books`, `get_book_metadata`, and `find_duplicates`.
+- Bridge job/audit visibility: `list_jobs`, `get_job_status`, and optional JSONL audit records via `CALIBRE_UMCP_AUDIT_PATH`.
+
+Mutating operations are intentionally rejected until each one is mapped to Calibre's in-process job APIs.
 
 
 - Container: `calibre`

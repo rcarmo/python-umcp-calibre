@@ -13,7 +13,8 @@ MCP client
 calibre-umcp facade, optional sidecar
   ↓ local HTTP JSON-RPC, optional bearer token
 Calibre µMCP Bridge plugin, inside Calibre GUI process
-  ↓ Calibre GUI/database APIs, serialized bridge worker and Calibre jobs where appropriate
+  ↓ current: serialized read-only database access
+  ↓ future mutators: Calibre JobManager / ThreadedJob APIs
 active Calibre library/database/files
 ```
 
@@ -62,9 +63,9 @@ Known mutating method names are recognized but rejected with an audit/job record
 - `move_book`
 - `email_book`
 
-## Calibre Jobs mapping
+## Calibre Jobs mapping — planned, not implemented
 
-Planned safe mappings for mutators:
+No mutating operation currently executes. The bridge recognizes mutation method names, creates rejected audit/job records, and returns an error. Planned safe mappings are:
 
 - Conversion: reuse Calibre's existing conversion path, which queues `ParallelJob` instances through `gui.job_manager.run_job()`.
 - Generic long-running in-process mutations: create `calibre.gui2.threaded_jobs.ThreadedJob` instances and enqueue them with `gui.job_manager.run_threaded_job()`, using `type_="umcp-bridge"` and `max_concurrent_count=1`.
