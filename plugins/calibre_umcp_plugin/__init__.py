@@ -11,7 +11,7 @@ PLUGIN_VERSION_STRING = ".".join(str(part) for part in PLUGIN_VERSION)
 
 class CalibreUmcpPlugin(InterfaceActionBase):
     name = "Calibre µMCP Bridge"
-    description = "Expose a local JSON-RPC bridge for safe calibre-umcp live-library access."
+    description = "Expose native MCP access to the active Calibre library."
     supported_platforms = ["windows", "osx", "linux"]
     author = "Rui Carmo"
     version = PLUGIN_VERSION
