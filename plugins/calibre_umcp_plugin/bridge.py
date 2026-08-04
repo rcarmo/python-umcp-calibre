@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 import uuid
+from ipaddress import ip_address
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -179,7 +180,18 @@ class CalibreRpcBridge:
         return redacted
 
 
+def is_loopback_bind(host: str) -> bool:
+    if host in {"localhost", ""}:
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def serve_bridge(gui, host: str, port: int, token: str | None = None, audit_path: str | None = None):
+    if not token and not is_loopback_bind(host):
+        raise ValueError("CALIBRE_UMCP_BRIDGE_TOKEN is required when binding the bridge outside loopback")
     bridge = CalibreRpcBridge(gui, token=token, audit_path=audit_path)
 
     class Handler(BaseHTTPRequestHandler):

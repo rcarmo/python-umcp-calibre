@@ -8,6 +8,8 @@ It uses a **plugin-first safe architecture** for live Calibre libraries:
 - an optional sidecar/facade exposes MCP over HTTP and delegates live-library operations to the plugin JSON-RPC bridge;
 - direct sidecar mutation of a mounted Calibre library is deliberately not the safe default.
 
+The bridge refuses non-loopback binds unless `CALIBRE_UMCP_BRIDGE_TOKEN` is set. Clients then authenticate to `/rpc` with `Authorization: Bearer <token>`.
+
 ## Current status
 
 Implemented and tested locally:

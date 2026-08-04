@@ -80,8 +80,15 @@ Useful environment variables:
 
 - `CALIBRE_UMCP_PORT` — bridge port, default `9000`.
 - `CALIBRE_UMCP_BRIDGE_HOST` — bind host, default `127.0.0.1`.
-- `CALIBRE_UMCP_BRIDGE_TOKEN` — optional bearer token for `/rpc`.
+- `CALIBRE_UMCP_BRIDGE_TOKEN` — bearer token for `/rpc`. Optional only for loopback binds; required by the bridge when `CALIBRE_UMCP_BRIDGE_HOST` is not loopback.
 - `CALIBRE_UMCP_AUDIT_PATH` — optional JSONL file for bridge audit records.
+
+Authentication policy:
+
+- default bind is `127.0.0.1`, where the token is optional for local-only use;
+- binding to `0.0.0.0`, a LAN IP, or a Docker DNS name without `CALIBRE_UMCP_BRIDGE_TOKEN` is refused at bridge startup;
+- authenticated clients must send `Authorization: Bearer <token>` to `/rpc`;
+- `/health` remains unauthenticated and returns only `{"ok": true}`.
 
 ## Bridge methods
 

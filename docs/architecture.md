@@ -28,7 +28,8 @@ The plugin is the authority for live library reads and all future writes. The si
 5. HTTP handler concurrency is serialized through the bridge worker before touching Calibre state.
 6. Long-running mutations should be queued through Calibre `JobManager` / `ThreadedJob` APIs for operator-visible progress and logs.
 7. The bridge binds to `127.0.0.1` by default unless `CALIBRE_UMCP_BRIDGE_HOST` is explicitly configured.
-8. Use `CALIBRE_UMCP_BRIDGE_TOKEN` when exposing the bridge beyond loopback.
+8. The bridge refuses to bind beyond loopback unless `CALIBRE_UMCP_BRIDGE_TOKEN` is set.
+9. Clients authenticate to `/rpc` with `Authorization: Bearer <token>` when a token is configured; `/health` is intentionally minimal and unauthenticated.
 
 ## Bridge API
 

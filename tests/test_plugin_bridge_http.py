@@ -3,11 +3,23 @@ import unittest
 import urllib.error
 import urllib.request
 
-from plugins.calibre_umcp_plugin.bridge import serve_bridge
+from plugins.calibre_umcp_plugin.bridge import is_loopback_bind, serve_bridge
 from test_plugin_bridge import FakeGui
 
 
 class BridgeHttpTests(unittest.TestCase):
+    def test_loopback_bind_detection(self):
+        self.assertTrue(is_loopback_bind("127.0.0.1"))
+        self.assertTrue(is_loopback_bind("::1"))
+        self.assertTrue(is_loopback_bind("localhost"))
+        self.assertFalse(is_loopback_bind("0.0.0.0"))
+        self.assertFalse(is_loopback_bind("calibre"))
+
+    def test_token_required_for_non_loopback_bind(self):
+        with self.assertRaises(ValueError):
+            serve_bridge(FakeGui(), "0.0.0.0", 0)
+        self.server = serve_bridge(FakeGui(), "0.0.0.0", 0, token="secret")
+
     def tearDown(self):
         server = getattr(self, "server", None)
         if server is not None:
