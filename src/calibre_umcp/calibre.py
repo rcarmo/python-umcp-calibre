@@ -39,6 +39,8 @@ class CalibreCLI:
             return str(self.config.calibre_bin / executable)
         found = shutil.which(executable)
         if not found:
+            if self.config.dry_run:
+                return executable
             raise CalibreError(f"Required Calibre executable not found on PATH: {executable}")
         return found
 

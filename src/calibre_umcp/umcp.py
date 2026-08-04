@@ -62,7 +62,7 @@ import math
 from json import JSONDecodeError, dumps, loads as _json_loads
 from logging import INFO, FileHandler, basicConfig, getLogger
 from pathlib import Path
-from umcp_shared import (
+from .umcp_shared import (
     MCPCancellationState,
     MCPHTTPResponse,
     MCPPrincipal,
