@@ -25,6 +25,7 @@ calibre-customize -a /path/to/calibre-umcp-plugin.zip
 
 After installing, restart Calibre or reload the GUI. The plugin action appears as `µMCP Bridge` and exposes menu items to start, inspect, or stop the bridge.
 
+
 Useful environment variables:
 
 - `CALIBRE_UMCP_PORT` — bridge port, default `9000`.
