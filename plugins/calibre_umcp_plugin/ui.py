@@ -100,6 +100,9 @@ class CalibreUmcpAction(InterfaceAction):
         try:
             self._server.shutdown()
             self._server.server_close()
+            thread = getattr(self._server, "thread", None)
+            if thread is not None:
+                thread.join(timeout=2)
         finally:
             self._server = None
             self._endpoint = None
@@ -111,6 +114,9 @@ class CalibreUmcpAction(InterfaceAction):
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
+            thread = getattr(self._server, "thread", None)
+            if thread is not None:
+                thread.join(timeout=2)
             self._server = None
             self._endpoint = None
             self._auth_enabled = False

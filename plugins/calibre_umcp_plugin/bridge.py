@@ -249,4 +249,5 @@ def serve_bridge(gui, host: str, port: int, token: str | None = None, audit_path
     server.bridge = bridge  # type: ignore[attr-defined]
     thread = threading.Thread(target=server.serve_forever, name="calibre-umcp-http", daemon=True)
     thread.start()
+    server.thread = thread  # type: ignore[attr-defined]
     return server

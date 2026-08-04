@@ -19,12 +19,14 @@ class BridgeHttpTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             serve_bridge(FakeGui(), "0.0.0.0", 0)
         self.server = serve_bridge(FakeGui(), "0.0.0.0", 0, token="secret")
+        self.assertTrue(self.server.thread.is_alive())
 
     def tearDown(self):
         server = getattr(self, "server", None)
         if server is not None:
             server.shutdown()
             server.server_close()
+            server.thread.join(timeout=2)
 
     def start_server(self, token=None):
         self.server = serve_bridge(FakeGui(), "127.0.0.1", 0, token=token)
