@@ -15,11 +15,13 @@ The build copies `src/calibre_umcp/umcp.py` and `src/calibre_umcp/umcp_shared.py
 
 ## A Narrow Tool Surface
 
-The MCP surface covers progressive discovery, server status, active-library listing, book search, metadata lookup, duplicate detection and audit-record inspection. Every advertised tool is read-only.
+The default MCP surface is read-only: progressive discovery, server status, active-library listing, book search, metadata lookup, duplicate detection, authenticated content-server status and audit records.
 
-The old internal bridge has names for conversion, copy, move and e-mail, but they only create a rejected audit record. They are not advertised through MCP because there is no safe implementation behind them yet.
+Mutation discovery has a second gate owned by the Calibre UI. A saved UI token plus explicit enablement exposes metadata, format, cover, import, conversion, export, copy/move, configured-recipient e-mail, trash deletion and conservative duplicate-merge tools. Paths and destination libraries come from UI allowlists rather than request-time host access.
 
-Adding one of those operations means mapping it to Calibre's own jobs, including progress, cancellation and errors in the GUI. A generic background thread is not an adequate substitute.
+Long work uses Calibre's job machinery. Conversion maps to a `ParallelJob`; import, export, copy/move and e-mail map to `ThreadedJob`. The bridge records its own stable ID alongside Calibre's job ID, then mirrors progress, cancellation and terminal errors without modifying Calibre job objects.
+
+Permanent deletion, arbitrary e-mail recipients, automatic e-mail conversion, temporary public links and device actions fail closed. Those operations either need a stronger policy boundary or depend on live device/server state that Calibre 9.11 does not expose as a safe scoped primitive.
 
 ## Authentication And Binding
 
@@ -33,4 +35,4 @@ The synchronous µMCP transport accepts a `server_ready` callback that hands its
 
 ## Packaging Paths
 
-`plugins/build-plugin.sh` builds from the local source tree. `plugins/install-from-gitea.sh` can fetch the same six files from a remote source and assemble the ZIP inside a Calibre container, where a full checkout is unnecessary.
+`plugins/build-plugin.sh` builds from the local source tree. `plugins/install-from-gitea.sh` can fetch the same seven files from a remote source and assemble the ZIP inside a Calibre container, where a full checkout is unnecessary.

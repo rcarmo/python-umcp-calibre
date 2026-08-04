@@ -56,6 +56,7 @@ class BridgeHttpTests(unittest.TestCase):
         missing_method = self.rpc(base, {"jsonrpc": "2.0", "id": "missing-method", "params": {}})
         self.assertEqual(missing_method["id"], "missing-method")
         self.assertIn("non-empty string", missing_method["error"]["message"])
+        self.assertEqual(missing_method["error"]["data"]["code"], "INVALID_REQUEST")
 
         bad_params = self.rpc(base, {"jsonrpc": "2.0", "id": "bad-params", "method": "ping", "params": []})
         self.assertEqual(bad_params["id"], "bad-params")

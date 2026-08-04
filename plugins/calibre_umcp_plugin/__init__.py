@@ -15,5 +15,8 @@ class CalibreUmcpPlugin(InterfaceActionBase):
     supported_platforms = ["windows", "osx", "linux"]
     author = "Rui Carmo"
     version = PLUGIN_VERSION
-    minimum_calibre_version = (6, 0, 0)
+    # The release surface is source-contract tested only against Calibre 9.11.0.
+    # Calibre treats this as a lower bound; bridge mutations separately require
+    # the exact 9.11.0 runtime and fail closed on later releases.
+    minimum_calibre_version = (9, 11, 0)
     actual_plugin = "calibre_plugins.calibre_umcp_plugin.ui:CalibreUmcpAction"

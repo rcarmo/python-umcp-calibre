@@ -43,6 +43,14 @@ class ServerToolTests(unittest.TestCase):
         with self.assertRaises(BridgeError):
             server.tool_convert_book("/tmp/in.epub", "/tmp/out.pdf")
 
+    def test_legacy_mutators_stay_rejected_even_when_bridge_is_configured(self):
+        server = CalibreMCPServer()
+        server.bridge = type("ConfiguredBridge", (), {"enabled": True})()
+        with self.assertRaisesRegex(BridgeError, "copy_books_to_library_mutation"):
+            server.tool_copy_book(1, "target")
+        with self.assertRaisesRegex(BridgeError, "move_books_to_library_mutation"):
+            server.tool_move_book_destructive(1, "target")
+
     def test_bridge_status_reports_disabled(self):
         server = CalibreMCPServer()
         self.assertEqual(server.tool_bridge_status_readonly()["enabled"], False)

@@ -9,7 +9,7 @@ from .umcp import MCPServer
 
 
 class CalibreMCPServer(MCPServer):
-    """MCP server for Calibre library automation."""
+    """Legacy read-only sidecar; mutations live only in the in-Calibre plugin."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -59,22 +59,22 @@ class CalibreMCPServer(MCPServer):
         mutating = [
             {
                 "name": "convert_book",
-                "summary": "Fail-closed mutator placeholder; requires future Calibre JobManager mapping.",
+                "summary": "Rejected legacy name; use the in-Calibre convert_book_mutation tool.",
                 "read_only": False,
             },
             {
                 "name": "copy_book",
-                "summary": "Fail-closed mutator placeholder; requires plugin bridge safe implementation.",
+                "summary": "Rejected legacy name; use the in-Calibre plural verified copy tool.",
                 "read_only": False,
             },
             {
                 "name": "move_book_destructive",
-                "summary": "Fail-closed destructive placeholder; requires plugin bridge safe implementation.",
+                "summary": "Rejected legacy name; use the in-Calibre plural verified move tool.",
                 "read_only": False,
             },
             {
                 "name": "email_book",
-                "summary": "Fail-closed mutator placeholder; requires plugin bridge safe implementation.",
+                "summary": "Rejected legacy name; use the in-Calibre email_book_mutation tool.",
                 "read_only": False,
             },
         ]
@@ -127,10 +127,10 @@ class CalibreMCPServer(MCPServer):
                 "args": {"job_id": "bridge job id"},
                 "returns": "One job/audit record.",
             },
-            "convert_book": {"purpose": "Mutator placeholder.", "status": "fail-closed until safe Calibre job mapping is implemented."},
-            "copy_book": {"purpose": "Mutator placeholder.", "status": "fail-closed until safe plugin implementation exists."},
-            "move_book_destructive": {"purpose": "Destructive mutator placeholder.", "status": "fail-closed until safe plugin implementation exists."},
-            "email_book": {"purpose": "Mutator placeholder.", "status": "fail-closed until safe plugin implementation exists."},
+            "convert_book": {"purpose": "Rejected legacy mutator name.", "status": "Use convert_book_mutation on the in-Calibre plugin."},
+            "copy_book": {"purpose": "Rejected legacy mutator name.", "status": "Use copy_books_to_library_mutation on the in-Calibre plugin."},
+            "move_book_destructive": {"purpose": "Rejected legacy mutator name.", "status": "Use move_books_to_library_mutation on the in-Calibre plugin."},
+            "email_book": {"purpose": "Rejected legacy mutator name.", "status": "Use email_book_mutation on the in-Calibre plugin."},
         }
         try:
             return {"name": tool_name, **details[tool_name]}
@@ -187,28 +187,20 @@ class CalibreMCPServer(MCPServer):
         return self.calibre.find_duplicates(library, limit=limit)
 
     def tool_convert_book(self, input_path: str, output_path: str, extra_args: list[str] | None = None) -> dict[str, Any]:
-        """Convert a book using Calibre's ebook-convert."""
-        if self.bridge.enabled:
-            return self.bridge.call("convert_book", input_path=input_path, output_path=output_path, extra_args=extra_args or [])
-        raise BridgeError("convert_book requires the Calibre plugin bridge for safe operation")
+        """Reject the legacy sidecar conversion name."""
+        raise BridgeError("Use convert_book_mutation on the in-Calibre plugin")
 
     def tool_copy_book(self, book_id: int, target_library: str, source_library: str | None = None) -> dict[str, Any]:
-        """Copy a book to another configured library."""
-        if self.bridge.enabled:
-            return self.bridge.call("copy_book", book_id=book_id, target_library=target_library, source_library=source_library)
-        raise BridgeError("copy_book requires the Calibre plugin bridge for safe operation")
+        """Reject the legacy singular sidecar copy name."""
+        raise BridgeError("Use copy_books_to_library_mutation on the in-Calibre plugin")
 
     def tool_move_book_destructive(self, book_id: int, target_library: str, source_library: str | None = None) -> dict[str, Any]:
-        """Move a book to another configured library."""
-        if self.bridge.enabled:
-            return self.bridge.call("move_book", book_id=book_id, target_library=target_library, source_library=source_library)
-        raise BridgeError("move_book requires the Calibre plugin bridge for safe operation")
+        """Reject the legacy singular destructive move name."""
+        raise BridgeError("Use move_books_to_library_mutation on the in-Calibre plugin")
 
     def tool_email_book(self, book_id: int, to: str, library: str | None = None) -> dict[str, Any]:
-        """Email a book using Calibre's configured mail support."""
-        if self.bridge.enabled:
-            return self.bridge.call("email_book", book_id=book_id, to=to, library=library)
-        raise BridgeError("email_book requires the Calibre plugin bridge for safe operation")
+        """Reject the legacy sidecar e-mail name."""
+        raise BridgeError("Use email_book_mutation on the in-Calibre plugin")
 
 
 # Explicit MCP annotation override: moving between libraries removes the source copy.

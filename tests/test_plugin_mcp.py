@@ -1,12 +1,16 @@
 import json
 import os
+import sys
+import types
 import unittest
 import urllib.error
 import urllib.request
+from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("CALIBRE_UMCP_DRY_RUN", "1")
 
-from plugins.calibre_umcp_plugin.mcp import serve_mcp
+from plugins.calibre_umcp_plugin.mcp import CalibrePluginMCPServer, serve_mcp
 from test_plugin_bridge import FakeGui
 
 
@@ -16,6 +20,7 @@ class PluginMCPTests(unittest.TestCase):
         if server is not None:
             server.shutdown()
             server.server_close()
+            server.bridge.close()
             server.thread.join(timeout=2)
 
     def start_server(self, token=None):
@@ -70,6 +75,51 @@ class PluginMCPTests(unittest.TestCase):
             },
         )
         self.assertEqual(called["result"]["structuredContent"][0]["id"], 1)
+
+    def test_mutation_discovery_requires_ui_token_and_explicit_policy(self):
+        disabled = CalibrePluginMCPServer(
+            FakeGui(), token="environment-only", ui_token_configured=False, mutations_enabled=True
+        )
+        self.addCleanup(disabled.bridge.close)
+        disabled_names = {tool["name"] for tool in disabled.discover_tools()["tools"]}
+        self.assertNotIn("capabilities_mutation", disabled_names)
+        self.assertNotIn("update_book_metadata_mutation", disabled_names)
+        self.assertFalse(
+            disabled.authorize_request(
+                SimpleNamespace(name="calibre-user"),
+                rpc_method="tools/call",
+                tool_name="update_book_metadata_mutation",
+            )
+        )
+
+        enabled = CalibrePluginMCPServer(
+            FakeGui(), token="ui-token", ui_token_configured=True, mutations_enabled=True
+        )
+        self.addCleanup(enabled.bridge.close)
+        enabled_names = {tool["name"] for tool in enabled.discover_tools()["tools"]}
+        self.assertIn("capabilities_mutation", enabled_names)
+        self.assertIn("update_book_metadata_mutation", enabled_names)
+        self.assertIn("convert_book_mutation", enabled_names)
+        self.assertIn("copy_books_to_library_mutation", enabled_names)
+        self.assertIn("move_books_to_library_mutation", enabled_names)
+        described = enabled.tool_describe_tool_readonly("update_book_metadata_mutation")
+        self.assertIn("changes", described["arguments"])
+        self.assertEqual(described["args"], described["arguments"])
+
+    def test_mutation_discovery_fails_closed_outside_exact_calibre_9_11_0(self):
+        calibre = types.ModuleType("calibre")
+        calibre.__path__ = []
+        constants = types.ModuleType("calibre.constants")
+        constants.numeric_version = (9, 11, 1)
+        with patch.dict(sys.modules, {"calibre": calibre, "calibre.constants": constants}):
+            server = CalibrePluginMCPServer(
+                FakeGui(), token="ui-token", ui_token_configured=True, mutations_enabled=True
+            )
+        self.addCleanup(server.bridge.close)
+        names = {tool["name"] for tool in server.discover_tools()["tools"]}
+        self.assertFalse(server.mutation_runtime_supported)
+        self.assertNotIn("capabilities_mutation", names)
+        self.assertNotIn("update_book_metadata_mutation", names)
 
     def test_health_and_bearer_auth(self):
         base = self.start_server(token="secret")

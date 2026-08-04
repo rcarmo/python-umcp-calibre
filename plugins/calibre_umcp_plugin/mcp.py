@@ -4,7 +4,14 @@ import json
 import threading
 from typing import Any
 
-from .bridge import BRIDGE_VERSION, CalibreRpcBridge, is_loopback_bind
+from .bridge import (
+    BRIDGE_VERSION,
+    STABLE_MUTATION_ERRORS,
+    BridgeMethodError,
+    CalibreRpcBridge,
+    is_loopback_bind,
+    mutation_runtime_supported,
+)
 
 try:
     from .umcp import MCPServer
@@ -17,10 +24,50 @@ except ImportError:  # Source-tree tests use the canonical runtime before plugin
 class CalibrePluginMCPServer(MCPServer):
     """µMCP server running inside the active Calibre GUI process."""
 
-    def __init__(self, gui, token: str | None = None, audit_path: str | None = None):
+    MUTATION_TOOLS = frozenset({
+        "capabilities_mutation",
+        "update_book_metadata_mutation",
+        "add_book_format_mutation",
+        "delete_book_format_mutation",
+        "set_book_cover_mutation",
+        "add_book_mutation",
+        "delete_books_mutation",
+        "merge_duplicates_mutation",
+        "convert_book_mutation",
+        "copy_books_to_library_mutation",
+        "move_books_to_library_mutation",
+        "save_book_to_disk_mutation",
+        "email_book_mutation",
+        "cancel_bridge_job_mutation",
+    })
+
+    def __init__(
+        self,
+        gui,
+        token: str | None = None,
+        audit_path: str | None = None,
+        audit_retention: int = 500,
+        ui_token_configured: bool = False,
+        mutations_enabled: bool = False,
+        policy: Any = None,
+    ):
         super().__init__()
         self.token = token
-        self.bridge = CalibreRpcBridge(gui, token=token, audit_path=audit_path)
+        self.ui_token_configured = bool(ui_token_configured)
+        self.mutation_runtime_supported = mutation_runtime_supported()
+        self.mutations_enabled = bool(
+            token and ui_token_configured and mutations_enabled and self.mutation_runtime_supported
+        )
+        self.policy = policy
+        self.bridge = CalibreRpcBridge(
+            gui,
+            token=token,
+            audit_path=audit_path,
+            audit_retention=audit_retention,
+            import_roots=tuple(getattr(policy, "import_roots", ()) or ()),
+            export_roots=tuple(getattr(policy, "export_roots", ()) or ()),
+            destination_libraries=tuple(getattr(policy, "destination_libraries", ()) or ()),
+        )
 
     def get_config(self) -> dict[str, Any]:
         config = super().get_config()
@@ -29,21 +76,60 @@ class CalibrePluginMCPServer(MCPServer):
         return config
 
     def get_instructions(self) -> str:
-        return (
+        guidance = (
             "Use capabilities_readonly first. Search with a small limit, then fetch "
-            "metadata for one selected book id. This server currently exposes read-only tools."
+            "metadata for one selected book id."
         )
+        if self.mutations_enabled:
+            guidance += " Use capabilities_mutation before requesting a metadata or format change."
+        return guidance
+
+    def discover_tools(self) -> dict[str, Any]:
+        discovered = super().discover_tools()
+        if not self.mutations_enabled:
+            discovered["tools"] = [
+                tool for tool in discovered["tools"] if tool["name"] not in self.MUTATION_TOOLS
+            ]
+        return discovered
 
     def authenticate_request(self, *, method: str, path: str, headers, peer: str | None) -> MCPPrincipal | None:
         if self.token and headers.get("authorization") != f"Bearer {self.token}":
             return None
         return MCPPrincipal(name="calibre-user")
 
+    def authorize_request(self, principal, *, rpc_method: str | None, tool_name: str | None) -> bool:
+        if rpc_method == "tools/call" and tool_name in self.MUTATION_TOOLS:
+            return bool(principal and self.mutations_enabled)
+        return principal is not None
+
     def handle_http_request(self, *, method: str, path: str, headers, body: bytes, peer: str | None) -> MCPHTTPResponse | None:
         if method == "GET" and path == "/health":
             payload = json.dumps({"ok": True, "version": BRIDGE_VERSION}).encode("utf-8")
             return MCPHTTPResponse(status=200, body=payload, content_type="application/json")
         return None
+
+    def tool_capabilities_mutation(self) -> dict[str, Any]:
+        """List only implemented and policy-enabled metadata and format mutations."""
+        self._require_mutations()
+        return {
+            "policy": "UI-configured token and explicit mutation enablement verified",
+            "stable_errors": sorted(STABLE_MUTATION_ERRORS),
+            "tools": [
+                {"name": "update_book_metadata_mutation", "summary": "Update validated metadata with rollback."},
+                {"name": "add_book_format_mutation", "summary": "Import a format from a configured root."},
+                {"name": "delete_book_format_mutation", "summary": "Remove one explicit format with final-format confirmation."},
+                {"name": "set_book_cover_mutation", "summary": "Replace or remove a cover with rollback."},
+                {"name": "add_book_mutation", "summary": "Queue confined book import through Calibre ThreadedJob."},
+                {"name": "delete_books_mutation", "summary": "Dry-run then move confirmed books to Calibre trash."},
+                {"name": "merge_duplicates_mutation", "summary": "Merge missing formats and metadata into an explicit survivor while retaining sources."},
+                {"name": "convert_book_mutation", "summary": "Queue one native Calibre conversion job."},
+                {"name": "copy_books_to_library_mutation", "summary": "Copy and hash-verify books in an allowlisted library."},
+                {"name": "move_books_to_library_mutation", "summary": "Preview, copy, verify, then move confirmed sources to Calibre trash."},
+                {"name": "save_book_to_disk_mutation", "summary": "Queue confined Calibre-template export with staged publication."},
+                {"name": "email_book_mutation", "summary": "Submit one existing format to a Calibre-configured recipient."},
+                {"name": "cancel_bridge_job_mutation", "summary": "Request native Calibre job cancellation."},
+            ],
+        }
 
     def tool_capabilities_readonly(self) -> dict[str, Any]:
         """Compact progressive-discovery entrypoint; call before listing or invoking detailed tools."""
@@ -57,6 +143,7 @@ class CalibrePluginMCPServer(MCPServer):
                 {"name": "search_books_readonly", "summary": "Bounded Calibre search."},
                 {"name": "get_book_metadata_readonly", "summary": "Metadata for one book id."},
                 {"name": "find_duplicates_readonly", "summary": "Probable duplicate groups."},
+                {"name": "content_server_status_readonly", "summary": "Existing authenticated content-server base URL, when safe."},
                 {"name": "list_bridge_jobs_readonly", "summary": "Bridge audit records."},
                 {"name": "get_bridge_job_status_readonly", "summary": "One bridge audit record."},
             ],
@@ -70,12 +157,73 @@ class CalibrePluginMCPServer(MCPServer):
             "search_books_readonly": {"arguments": {"query": "Calibre query", "limit": "default 20, max 500"}},
             "get_book_metadata_readonly": {"arguments": {"book_id": "integer Calibre id"}},
             "find_duplicates_readonly": {"arguments": {"limit": "default 1000, max 5000"}},
+            "content_server_status_readonly": {"arguments": {}, "returns": "running/auth status and a base URL only for authenticated concrete binds"},
             "list_bridge_jobs_readonly": {"arguments": {}},
             "get_bridge_job_status_readonly": {"arguments": {"job_id": "bridge audit id"}},
         }
+        mutation_details = {
+            "update_book_metadata_mutation": {
+                "arguments": {"book_id": "integer Calibre id", "changes": "validated metadata fields"},
+                "returns": "completed bridge job record",
+            },
+            "add_book_format_mutation": {
+                "arguments": {"book_id": "integer Calibre id", "path": "file below configured import root", "format": "optional extension", "replace": "explicit replacement"},
+                "returns": "completed bridge job record",
+            },
+            "delete_book_format_mutation": {
+                "arguments": {"book_id": "integer Calibre id", "format": "explicit extension", "allow_last_format": "required for final format"},
+                "returns": "completed bridge job record",
+            },
+            "set_book_cover_mutation": {
+                "arguments": {"book_id": "integer Calibre id", "path": "cover below configured import root", "remove": "remove existing cover"},
+                "returns": "completed bridge job record",
+            },
+            "add_book_mutation": {
+                "arguments": {"path": "book below configured import root", "format": "optional extension", "duplicate_policy": "reject, skip or add"},
+                "returns": "queued bridge job record linked to Calibre ThreadedJob",
+            },
+            "delete_books_mutation": {
+                "arguments": {"book_ids": "non-empty id list", "dry_run": "default true", "confirmation": "exact value returned by dry-run"},
+                "returns": "preview or Calibre-trash result",
+            },
+            "merge_duplicates_mutation": {
+                "arguments": {"survivor_id": "explicit survivor", "source_ids": "records retained after merge", "confirmation": "exact MERGE_KEEP_SOURCES value"},
+                "returns": "completed conservative merge record",
+            },
+            "convert_book_mutation": {
+                "arguments": {"book_id": "integer Calibre id", "output_format": "target extension", "replace_existing": "explicit replacement", "options": "bounded scalar overrides", "store_result": "attach to book or export", "export_path": "required configured-root path when exporting", "overwrite_export": "explicit collision policy"},
+                "returns": "queued bridge job record linked to Calibre JobManager",
+            },
+            "copy_books_to_library_mutation": {
+                "arguments": {"book_ids": "source ids", "destination_library": "exact UI-allowlisted library", "duplicate_policy": "reject, skip, add, merge_missing or replace", "destination_book_ids": "required source-to-destination map for merge policies"},
+                "returns": "queued, independently verified Calibre ThreadedJob record",
+            },
+            "move_books_to_library_mutation": {
+                "arguments": {"book_ids": "source ids", "destination_library": "exact UI-allowlisted library", "dry_run": "default true", "confirmation": "exact preview value", "duplicate_policy": "explicit policy"},
+                "returns": "preview or queued verified-copy-then-trash job record",
+            },
+            "save_book_to_disk_mutation": {
+                "arguments": {"book_id": "source id", "destination_directory": "directory below configured export root", "options": "bounded Calibre save options", "overwrite": "explicit collision replacement"},
+                "returns": "queued Calibre ThreadedJob with bounded artefact paths",
+            },
+            "email_book_mutation": {
+                "arguments": {"book_id": "source id", "recipient": "exact Calibre-configured account", "format": "existing format allowed for recipient", "auto_convert": "unsupported; queue conversion separately"},
+                "returns": "queued native email ThreadedJob; SMTP acceptance is separate from delivery",
+            },
+            "cancel_bridge_job_mutation": {
+                "arguments": {"job_id": "bridge job id"},
+                "returns": "updated bridge job record",
+            },
+        }
+        if tool_name in mutation_details:
+            self._require_mutations()
+            details.update(mutation_details)
         if tool_name not in details:
             raise ValueError(f"Unknown implemented tool: {tool_name}")
-        return {"name": tool_name, **details[tool_name]}
+        detail = dict(details[tool_name])
+        if "arguments" in detail and "args" not in detail:
+            detail["args"] = dict(detail["arguments"])
+        return {"name": tool_name, **detail}
 
     def tool_bridge_status_readonly(self) -> dict[str, Any]:
         """Report plugin version and active Calibre library."""
@@ -97,6 +245,10 @@ class CalibrePluginMCPServer(MCPServer):
         """Find probable duplicate books in the active library."""
         return self.bridge.call_serialized("find_duplicates", {"limit": limit})
 
+    def tool_content_server_status_readonly(self) -> dict[str, Any]:
+        """Return only an existing authenticated server base URL; never mint temporary links."""
+        return self.bridge.call_serialized("content_server_status", {})
+
     def tool_list_bridge_jobs_readonly(self) -> list[dict[str, Any]]:
         """List bridge audit records."""
         return self.bridge.call_serialized("list_jobs", {})
@@ -105,12 +257,223 @@ class CalibrePluginMCPServer(MCPServer):
         """Return one bridge audit record."""
         return self.bridge.call_serialized("get_job_status", {"job_id": job_id})
 
+    def _require_mutations(self) -> None:
+        if not self.mutations_enabled:
+            raise ValueError("POLICY_DENIED: mutation discovery is disabled by Calibre UI policy")
 
-def serve_mcp(gui, host: str, port: int, token: str | None = None, audit_path: str | None = None):
+    def _call_mutation(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self._require_mutations()
+        try:
+            return self.bridge.call_serialized(method, params)
+        except BridgeMethodError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def tool_update_book_metadata_mutation(self, book_id: int, changes: dict[str, Any]) -> dict[str, Any]:
+        """Update validated metadata through a short serialised GUI-thread operation with rollback."""
+        return self._call_mutation("update_book_metadata", {"book_id": book_id, "changes": changes})
+
+    def tool_add_book_format_mutation(
+        self,
+        book_id: int,
+        path: str,
+        format: str = "",
+        replace: bool = False,
+    ) -> dict[str, Any]:
+        """Import one format from a UI-configured root, preserving an old format on failure."""
+        return self._call_mutation(
+            "add_book_format",
+            {"book_id": book_id, "path": path, "format": format, "replace": replace},
+        )
+
+    def tool_delete_book_format_mutation(
+        self,
+        book_id: int,
+        format: str,
+        allow_last_format: bool = False,
+    ) -> dict[str, Any]:
+        """Delete one explicit format; final-format removal requires explicit confirmation."""
+        return self._call_mutation(
+            "delete_book_format",
+            {"book_id": book_id, "format": format, "allow_last_format": allow_last_format},
+        )
+
+    def tool_set_book_cover_mutation(self, book_id: int, path: str = "", remove: bool = False) -> dict[str, Any]:
+        """Replace a cover from a configured import root, or remove it, with rollback."""
+        return self._call_mutation("set_book_cover", {"book_id": book_id, "path": path, "remove": remove})
+
+    def tool_add_book_mutation(
+        self,
+        path: str,
+        format: str = "",
+        duplicate_policy: str = "reject",
+    ) -> dict[str, Any]:
+        """Queue a confined single-book import with explicit duplicate policy."""
+        return self._call_mutation(
+            "add_book",
+            {"path": path, "format": format, "duplicate_policy": duplicate_policy},
+        )
+
+    def tool_delete_books_mutation(
+        self,
+        book_ids: list[int],
+        dry_run: bool = True,
+        confirmation: str = "",
+        permanent: bool = False,
+    ) -> dict[str, Any]:
+        """Preview deletion, then move exactly confirmed books to Calibre trash."""
+        return self._call_mutation(
+            "delete_books",
+            {"book_ids": book_ids, "dry_run": dry_run, "confirmation": confirmation, "permanent": permanent},
+        )
+
+    def tool_merge_duplicates_mutation(
+        self,
+        survivor_id: int,
+        source_ids: list[int],
+        confirmation: str,
+        replace_cover: bool = False,
+        save_alternate_cover: bool = False,
+    ) -> dict[str, Any]:
+        """Conservatively merge into an explicit survivor without deleting source records."""
+        return self._call_mutation(
+            "merge_duplicates",
+            {
+                "survivor_id": survivor_id,
+                "source_ids": source_ids,
+                "confirmation": confirmation,
+                "replace_cover": replace_cover,
+                "save_alternate_cover": save_alternate_cover,
+            },
+        )
+
+    def tool_convert_book_mutation(
+        self,
+        book_id: int,
+        output_format: str,
+        replace_existing: bool = False,
+        options: dict[str, Any] | None = None,
+        store_result: bool = True,
+        export_path: str = "",
+        overwrite_export: bool = False,
+    ) -> dict[str, Any]:
+        """Queue conversion through Calibre's worker JobManager and return its bridge record immediately."""
+        return self._call_mutation(
+            "convert_book",
+            {
+                "book_id": book_id,
+                "output_format": output_format,
+                "replace_existing": replace_existing,
+                "options": options or {},
+                "store_result": store_result,
+                "export_path": export_path,
+                "overwrite_export": overwrite_export,
+            },
+        )
+
+    def tool_copy_books_to_library_mutation(
+        self,
+        book_ids: list[int],
+        destination_library: str,
+        duplicate_policy: str = "reject",
+        destination_book_ids: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        """Queue a non-switching, hash-verified copy to one UI-allowlisted library."""
+        return self._call_mutation(
+            "copy_books_to_library",
+            {
+                "book_ids": book_ids,
+                "destination_library": destination_library,
+                "duplicate_policy": duplicate_policy,
+                "destination_book_ids": destination_book_ids or {},
+            },
+        )
+
+    def tool_move_books_to_library_mutation(
+        self,
+        book_ids: list[int],
+        destination_library: str,
+        dry_run: bool = True,
+        confirmation: str = "",
+        duplicate_policy: str = "reject",
+        destination_book_ids: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        """Preview or queue verified copy followed by source removal to Calibre trash."""
+        return self._call_mutation(
+            "move_books_to_library",
+            {
+                "book_ids": book_ids,
+                "destination_library": destination_library,
+                "dry_run": dry_run,
+                "confirmation": confirmation,
+                "duplicate_policy": duplicate_policy,
+                "destination_book_ids": destination_book_ids or {},
+            },
+        )
+
+    def tool_save_book_to_disk_mutation(
+        self,
+        book_id: int,
+        destination_directory: str,
+        options: dict[str, Any] | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Queue a confined, staged export using Calibre's save-to-disk engine."""
+        return self._call_mutation(
+            "save_book_to_disk",
+            {
+                "book_id": book_id,
+                "destination_directory": destination_directory,
+                "options": options or {},
+                "overwrite": overwrite,
+            },
+        )
+
+    def tool_email_book_mutation(
+        self,
+        book_id: int,
+        recipient: str,
+        format: str,
+        auto_convert: bool = False,
+    ) -> dict[str, Any]:
+        """Queue SMTP submission to an existing Calibre-configured recipient."""
+        return self._call_mutation(
+            "email_book",
+            {"book_id": book_id, "recipient": recipient, "format": format, "auto_convert": auto_convert},
+        )
+
+    def tool_cancel_bridge_job_mutation(self, job_id: str) -> dict[str, Any]:
+        """Request cancellation of a queued or running native Calibre job."""
+        return self._call_mutation("cancel_job", {"job_id": job_id})
+
+
+def serve_mcp(
+    gui,
+    host: str | None = None,
+    port: int | None = None,
+    token: str | None = None,
+    audit_path: str | None = None,
+    *,
+    settings: Any = None,
+):
+    if settings is not None:
+        host = settings.host
+        port = settings.port
+        token = settings.token
+        audit_path = settings.audit_path
+    host = host or "127.0.0.1"
+    port = 9000 if port is None else int(port)
     if not token and not is_loopback_bind(host):
-        raise ValueError("CALIBRE_UMCP_BRIDGE_TOKEN is required when binding MCP outside loopback")
+        raise ValueError("A bridge token is required when binding MCP outside loopback")
 
-    mcp = CalibrePluginMCPServer(gui, token=token, audit_path=audit_path)
+    mcp = CalibrePluginMCPServer(
+        gui,
+        token=token,
+        audit_path=audit_path,
+        audit_retention=getattr(settings, "audit_retention", 500),
+        ui_token_configured=getattr(settings, "ui_token_configured", False),
+        mutations_enabled=getattr(settings, "mutations_enabled", False),
+        policy=settings,
+    )
     ready = threading.Event()
     holder: dict[str, Any] = {}
 
@@ -118,16 +481,36 @@ def serve_mcp(gui, host: str, port: int, token: str | None = None, audit_path: s
         holder["httpd"] = httpd
         ready.set()
 
+    def run_server() -> None:
+        try:
+            mcp.run_streamable_http(host=host, port=port, endpoint="/mcp", server_ready=server_ready)
+        except Exception as exc:
+            holder["error"] = exc
+            ready.set()
+
     thread = threading.Thread(
-        target=mcp.run_streamable_http,
-        kwargs={"host": host, "port": port, "endpoint": "/mcp", "server_ready": server_ready},
+        target=run_server,
         name="calibre-umcp-mcp",
         daemon=True,
     )
     thread.start()
     if not ready.wait(timeout=5):
+        mcp.bridge.close()
         raise RuntimeError("Timed out starting embedded µMCP server")
+    if "error" in holder:
+        mcp.bridge.close()
+        thread.join(timeout=1)
+        raise RuntimeError(f"Failed to start embedded µMCP server: {holder['error']}") from holder["error"]
     httpd = holder["httpd"]
+    original_server_close = httpd.server_close
+
+    def server_close_with_bridge() -> None:
+        try:
+            original_server_close()
+        finally:
+            mcp.bridge.close()
+
+    httpd.server_close = server_close_with_bridge  # type: ignore[method-assign]
     httpd.thread = thread
     httpd.bridge = mcp.bridge
     httpd.mcp = mcp

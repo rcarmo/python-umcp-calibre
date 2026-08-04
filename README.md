@@ -6,11 +6,17 @@ The server runs inside Calibre as an Interface Action plugin and uses [`umcp`][u
 
 ## What It Does
 
-The useful path is deliberately read-only. Clients can inspect the active library, search for books, fetch metadata, find probable duplicates and inspect bridge audit records. `capabilities_readonly` gives agents a compact starting point, while `describe_tool_readonly` expands the description of a single tool when needed.
+Clients can inspect the active library, search for books, fetch metadata, find probable duplicates, check an existing authenticated content server and inspect bridge audit records. `capabilities_readonly` gives agents a compact starting point, while `describe_tool_readonly` expands one tool at a time.
 
-Conversion, copying, moving and e-mail are absent from the MCP tool list. They need proper Calibre `JobManager` mappings rather than a hopeful call into an open library, and pretending otherwise would be worse than leaving them out.
+Mutations stay hidden until the Calibre UI has both saved a token and enabled them. Once that gate is open, the plugin can update metadata and formats, replace covers, import books, convert formats, export through Calibre's save-to-disk engine, copy or move books between allowlisted libraries, submit an existing format to a configured e-mail recipient, merge duplicates conservatively and move confirmed deletions to Calibre trash.
+
+The slower paths appear in Calibre's own Jobs UI. Conversion uses a worker-process job; import, export, copy/move and e-mail use `ThreadedJob`. Move is deliberately fussy: preview -> copy -> metadata and format-hash verification -> source trash. Any uncertainty leaves the source in place.
+
+A few boundaries are intentional. Permanent deletion, arbitrary e-mail recipients, implicit e-mail conversion, unauthenticated or temporary public links, and device actions are not exposed. Calibre 9.11 has no safe scoped temporary-link API, and device operations depend on live GUI/device state that the bridge cannot treat as a stable library mutation.
 
 The plugin also exposes `GET /health`, plus Start, Status and Stop actions in the Calibre GUI. Non-loopback binds require a bearer token.
+
+This release is source-contract and runtime tested against exactly Calibre 9.11.0 (`v9.11.0`, commit `b23dfb5d`). The plugin declares 9.11.0 as its minimum; later Calibre releases may still load the read-only surface, but mutation discovery fails closed until that exact runtime has been audited again.
 
 ## Building It
 

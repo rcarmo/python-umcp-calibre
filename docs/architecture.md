@@ -34,6 +34,10 @@ capabilities_readonly
 
 `describe_tool_readonly(tool_name)` provides focused guidance when an agent needs more than the compact capability summary. This is mostly about avoiding large search results--seven small tool schemas are not the expensive part.
 
-## The Deliberate Gap
+## Mutation Boundary
 
-The advertised tools only read the active library. Conversion, copying, moving and e-mail need explicit mappings to Calibre's `JobManager` or `ThreadedJob` APIs, with progress and failure handling visible in the GUI. Until those mappings exist, the internal bridge recognises mutation names only to reject and audit them.
+The default advertised surface is read-only. Mutation discovery appears only when a token was saved in the Calibre UI, mutations were explicitly enabled there, and the runtime is exactly Calibre 9.11.0. Short database changes run on the GUI thread; conversion maps to `ParallelJob`, while import, copy/move, save-to-disk and e-mail map to `ThreadedJob`. Bridge IDs mirror native progress and cancellation without changing Calibre job objects.
+
+Permanent deletion, arbitrary recipients, implicit e-mail conversion, temporary public links and device actions remain deliberately unavailable. Singular legacy `copy_book` and `move_book` calls are rejected in favour of the plural verified operations.
+
+`src/calibre_umcp/server.py` remains a compatibility read-only CLI surface for older deployments and tests. It is not the released in-Calibre mutation catalogue: its legacy mutator names fail closed and are not advertised by the plugin ZIP.
