@@ -1,63 +1,52 @@
 # python-umcp-calibre
 
-An MCP server that runs **inside Calibre** as an Interface Action plugin. It uses Rui Carmo's [`umcp`](https://github.com/rcarmo/umcp) runtime and accesses the active library through Calibre's in-process database APIs.
+Calibre is quite particular about who touches its active library--and rightly so, since the GUI keeps database and filesystem state in memory. I wrote `python-umcp-calibre` to expose that live library to MCP clients without putting a second process in charge of `metadata.db`.
 
-There is no sidecar in the deployed architecture.
+The server runs inside Calibre as an Interface Action plugin and uses [`umcp`][umcp] for Streamable HTTP. There is no sidecar: an MCP client connects directly to `/mcp`, and every library call reaches `gui.current_db` through a serialised worker.
 
-## Implemented
+## What It Does
 
-- Native µMCP Streamable HTTP endpoint: `POST /mcp`
-- Health endpoint: `GET /health`
-- Calibre GUI actions: Start, Status, Stop
-- Optional bearer authentication; mandatory for non-loopback binds
-- Serialized access to the active Calibre database
-- Progressive discovery:
-  - `capabilities_readonly`
-  - `describe_tool_readonly`
-- Read-only MCP tools:
-  - `bridge_status_readonly`
-  - `list_libraries_readonly`
-  - `search_books_readonly`
-  - `get_book_metadata_readonly`
-  - `find_duplicates_readonly`
-  - `list_bridge_jobs_readonly`
-  - `get_bridge_job_status_readonly`
+The useful path is deliberately read-only. Clients can inspect the active library, search for books, fetch metadata, find probable duplicates and inspect bridge audit records. `capabilities_readonly` gives agents a compact starting point, while `describe_tool_readonly` expands the description of a single tool when needed.
 
-Conversion, copy, move, and email are not exposed as MCP tools because safe Calibre job mappings are not implemented. The older internal bridge recognizes those names only to reject and audit them.
+Conversion, copying, moving and e-mail are absent from the MCP tool list. They need proper Calibre `JobManager` mappings rather than a hopeful call into an open library, and pretending otherwise would be worse than leaving them out.
 
-## Build and test
+The plugin also exposes `GET /health`, plus Start, Status and Stop actions in the Calibre GUI. Non-loopback binds require a bearer token.
+
+## Building It
 
 ```sh
 PYTHONPATH=.:src python3 -W error::ResourceWarning -m unittest discover -s tests -v
 sh plugins/build-plugin.sh
 ```
 
-The plugin ZIP includes `umcp.py` and `umcp_shared.py` from the canonical runtime in `src/calibre_umcp`.
+The build produces `plugins/calibre-umcp-plugin.zip`. It copies `umcp.py` and `umcp_shared.py` from `src/calibre_umcp` into the archive, so the plugin uses the same µMCP runtime as the rest of the repository rather than carrying a second protocol implementation.
 
-## Install
+## Installing It
+
+Install the ZIP with Calibre's plugin utility:
 
 ```sh
 calibre-customize -a plugins/calibre-umcp-plugin.zip
 ```
 
-For linuxserver/calibre, install as the profile owner:
+linuxserver/calibre profiles are normally owned by `abc`, so install as that user inside the container:
 
 ```sh
 s6-setuidgid abc calibre-customize -a plugins/calibre-umcp-plugin.zip
 ```
 
-Restart/reload Calibre after installation, then use `µMCP Bridge → Start bridge`.
+Restart or reload Calibre after replacing the plugin. It starts MCP automatically once the active library is available; the `µMCP Bridge` menu still provides Status, Stop and Start controls.
 
-## Runtime configuration
+## Connecting
 
-Defaults:
+The default bind is local to the Calibre process:
 
 ```sh
 CALIBRE_UMCP_BRIDGE_HOST=127.0.0.1
 CALIBRE_UMCP_PORT=9000
 ```
 
-For network access:
+To reach it across a container or LAN network, bind explicitly and set a long random token:
 
 ```sh
 CALIBRE_UMCP_BRIDGE_HOST=0.0.0.0
@@ -65,16 +54,8 @@ CALIBRE_UMCP_PORT=9000
 CALIBRE_UMCP_BRIDGE_TOKEN=<long-random-token>
 ```
 
-Connect an MCP client to:
+The MCP URL is `http://<calibre-host>:9000/mcp`. Authenticated clients send `Authorization: Bearer <token>`.
 
-```text
-http://<calibre-host>:9000/mcp
-```
+The [architecture notes](docs/architecture.md) explain the process boundary, the [design notes](docs/design.md) cover the implementation choices, and the [plugin README](plugins/README.md) has the container-oriented installation details.
 
-When configured, send:
-
-```text
-Authorization: Bearer <token>
-```
-
-See [`docs/architecture.md`](docs/architecture.md), [`docs/design.md`](docs/design.md), and [`plugins/README.md`](plugins/README.md).
+[umcp]: https://github.com/rcarmo/umcp

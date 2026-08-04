@@ -1,61 +1,52 @@
-# Calibre µMCP plugin
+# Calibre µMCP Plugin
 
-This Interface Action plugin runs a native `umcp.MCPServer` inside the Calibre GUI process. No sidecar is required.
+This Interface Action plugin runs `umcp.MCPServer` inside the Calibre GUI process, which lets MCP clients read the active library without a sidecar or a second writer touching `metadata.db`.
 
-## Build
+## Building The ZIP
 
 ```sh
 sh plugins/build-plugin.sh
 ```
 
-The resulting `plugins/calibre-umcp-plugin.zip` contains:
+The resulting `plugins/calibre-umcp-plugin.zip` contains the four plugin files (`__init__.py`, `ui.py`, `mcp.py` and `bridge.py`) plus `umcp.py` and `umcp_shared.py`. The latter two come from the canonical runtime under `src/calibre_umcp` and are removed from the plugin source directory after packaging.
 
-- `__init__.py`
-- `ui.py`
-- `mcp.py`
-- `bridge.py`
-- `umcp.py`
-- `umcp_shared.py`
+## Installing In A Container
 
-The last two files are copied from the canonical runtime under `src/calibre_umcp` during packaging.
-
-## Install
+linuxserver/calibre runs the profile as `abc`, so install the ZIP with matching ownership:
 
 ```sh
 s6-setuidgid abc calibre-customize -a plugins/calibre-umcp-plugin.zip
 ```
 
-Restart/reload Calibre, then select `µMCP Bridge → Start bridge`.
+Restart or reload Calibre. The plugin starts MCP automatically after the active library loads; the `µMCP Bridge` menu can inspect, stop or restart it. MCP is at `http://<host>:9000/mcp`, with health status at `http://<host>:9000/health`.
 
-The plugin exposes:
-
-- MCP Streamable HTTP: `http://<host>:9000/mcp`
-- health: `http://<host>:9000/health`
-
-## Install from Gitea mirror
 
 ```sh
-plugins/install-from-gitea.sh
+CALIBRE_USER=abc
+CALIBRE_GROUP=users
 ```
 
-Defaults:
+Override `GITEA_BASE`, `WORK` or `OUT` when installing from another mirror or temporary directory.
 
-- `CALIBRE_USER=abc`
-- `CALIBRE_GROUP=users`
+## Binding And Authentication
 
-The installer fetches the plugin files plus the canonical µMCP runtime, creates `/tmp/calibre-umcp-plugin.zip`, and installs it with `calibre-customize`.
-
-## Configuration
+The safe default is loopback-only:
 
 ```sh
 CALIBRE_UMCP_BRIDGE_HOST=127.0.0.1
 CALIBRE_UMCP_PORT=9000
-CALIBRE_UMCP_BRIDGE_TOKEN=<optional-on-loopback-required-otherwise>
-CALIBRE_UMCP_AUDIT_PATH=<optional-jsonl-path>
 ```
 
-For Docker/LAN access, bind `0.0.0.0` and set a long random token. MCP clients must send `Authorization: Bearer <token>`.
+Docker or LAN clients need an explicit bind and token:
 
-## Scope
+```sh
+CALIBRE_UMCP_BRIDGE_HOST=0.0.0.0
+CALIBRE_UMCP_PORT=9000
+CALIBRE_UMCP_BRIDGE_TOKEN=<long-random-token>
+```
 
-Implemented MCP tools are read-only: progressive discovery, status, library listing, search, metadata, duplicate detection, and audit record inspection. Conversion, copy, move, and email are deliberately not advertised until safe Calibre job mappings exist.
+The server refuses a non-loopback bind without that token. `CALIBRE_UMCP_AUDIT_PATH` may point to a JSONL file for rejected-operation audit records.
+
+## Current Limits
+
+The MCP tools cover discovery, status, library listing, search, metadata, duplicate detection and audit records. Conversion, copying, moving and e-mail are omitted until they can use Calibre's own job APIs rather than an ad-hoc worker.

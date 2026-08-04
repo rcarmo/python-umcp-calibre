@@ -1,47 +1,36 @@
 # Design
 
-## Decision
+## One MCP Runtime
 
-Run MCP directly inside the Calibre Interface Action plugin using `umcp.MCPServer`. Do not deploy a sidecar and do not maintain a second MCP protocol implementation.
+The plugin subclasses `umcp.MCPServer` and exposes MCP directly from the Calibre process. This avoids both a sidecar and a smaller, subtly different protocol implementation--the sort of duplication that behaves perfectly until a client sends a notification or negotiates another protocol version.
 
-## Components
+Four files contain the Calibre-specific code:
 
-- `plugins/calibre_umcp_plugin/ui.py` — Calibre Start/Status/Stop actions
-- `plugins/calibre_umcp_plugin/mcp.py` — Calibre-specific `MCPServer` subclass and tool methods
-- `plugins/calibre_umcp_plugin/bridge.py` — serialized access to `gui.current_db`
-- `src/calibre_umcp/umcp.py` — canonical µMCP runtime, copied into the plugin ZIP at build time
-- `src/calibre_umcp/umcp_shared.py` — shared µMCP transport types/helpers
+* `plugins/calibre_umcp_plugin/ui.py` owns automatic startup, the Calibre actions and server lifecycle.
+* `plugins/calibre_umcp_plugin/mcp.py` defines the MCP server, authentication hook and tools.
+* `plugins/calibre_umcp_plugin/bridge.py` serialises access to `gui.current_db`.
+* `plugins/calibre_umcp_plugin/__init__.py` provides Calibre's plugin metadata.
 
-## Scope
+The build copies `src/calibre_umcp/umcp.py` and `src/calibre_umcp/umcp_shared.py` into the plugin ZIP. Those copies are temporary packaging inputs, not another source tree.
 
-Implemented:
+## A Narrow Tool Surface
 
-- µMCP Streamable HTTP transport at `/mcp`
-- `/health` auxiliary route
-- bearer authentication
-- progressive discovery
-- active-library status/listing
-- book search and metadata
-- duplicate detection
-- audit/job record inspection
+The MCP surface covers progressive discovery, server status, active-library listing, book search, metadata lookup, duplicate detection and audit-record inspection. Every advertised tool is read-only.
 
-Not implemented or advertised:
+The old internal bridge has names for conversion, copy, move and e-mail, but they only create a rejected audit record. They are not advertised through MCP because there is no safe implementation behind them yet.
 
-- conversion
-- copy between libraries
-- destructive move
-- email
+Adding one of those operations means mapping it to Calibre's own jobs, including progress, cancellation and errors in the GUI. A generic background thread is not an adequate substitute.
 
-Those mutations require explicit Calibre `JobManager`/`ThreadedJob` mappings and are outside the current YAGNI read-only scope.
+## Authentication And Binding
 
-## Packaging
+Loopback use may omit a token. Binding to `0.0.0.0`, a LAN address or a container-facing interface requires `CALIBRE_UMCP_BRIDGE_TOKEN`; µMCP's authentication hook then checks `Authorization: Bearer <token>` for `/mcp`.
 
-`plugins/build-plugin.sh` copies the canonical µMCP runtime into the plugin package, builds the ZIP, and removes the temporary copies from the source tree. `plugins/install-from-gitea.sh` fetches the same six source files when installing from the Gitea mirror.
+`GET /health` is intentionally small and unauthenticated. It returns status and plugin version, not library contents.
 
-## Authentication
+## Shutdown Without Debris
 
-Loopback use may omit a token. Any non-loopback bind is rejected unless `CALIBRE_UMCP_BRIDGE_TOKEN` is configured. µMCP's authentication hook validates `Authorization: Bearer <token>` for `/mcp`.
+The synchronous µMCP transport accepts a `server_ready` callback that hands its `ThreadingHTTPServer` to the plugin after binding. The Calibre action can therefore call `shutdown()`, `server_close()` and join the daemon thread instead of abandoning it during plugin reload or application shutdown.
 
-## Lifecycle
+## Packaging Paths
 
-The plugin starts µMCP in a daemon thread. A small `server_ready` callback added to the canonical synchronous µMCP transport returns the underlying HTTP server to the Calibre action, allowing Stop and Calibre shutdown to call `shutdown()`, `server_close()`, and join the thread.
+`plugins/build-plugin.sh` builds from the local source tree. `plugins/install-from-gitea.sh` fetches the same six files from the Gitea mirror and assembles the ZIP inside the Calibre container, where a full checkout is unnecessary.

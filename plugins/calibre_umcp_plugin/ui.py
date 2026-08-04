@@ -4,7 +4,7 @@ import os
 
 from calibre.gui2 import error_dialog, info_dialog
 from calibre.gui2.actions import InterfaceAction
-from qt.core import QAction, QMenu
+from qt.core import QAction, QMenu, QTimer
 
 from .bridge import BRIDGE_VERSION
 from .mcp import serve_mcp
@@ -34,6 +34,9 @@ class CalibreUmcpAction(InterfaceAction):
         self.stop_action.triggered.connect(self.stop_bridge)
         self._refresh_actions()
 
+        # Let Calibre finish loading the active library before binding MCP.
+        QTimer.singleShot(1000, lambda: self.start_bridge(notify=False))
+
     def _library_path(self) -> str:
         db = self.gui.current_db
         library_path = getattr(db, "library_path", None)
@@ -47,7 +50,7 @@ class CalibreUmcpAction(InterfaceAction):
         self.status_action.setEnabled(True)
         self.stop_action.setEnabled(running)
 
-    def start_bridge(self):
+    def start_bridge(self, checked=False, notify=True):
         if self._server is not None:
             self.status_bridge()
             return
@@ -73,12 +76,13 @@ class CalibreUmcpAction(InterfaceAction):
             return
 
         self._refresh_actions()
-        info_dialog(
-            self.gui,
-            "Calibre µMCP Bridge",
-            f"Bridge {BRIDGE_VERSION} listening on {self._endpoint}\nAuth: {'enabled' if self._auth_enabled else 'disabled'}\nLibrary: {library_path}",
-            show=True,
-        )
+        if notify:
+            info_dialog(
+                self.gui,
+                "Calibre µMCP Bridge",
+                f"Bridge {BRIDGE_VERSION} listening on {self._endpoint}\nAuth: {'enabled' if self._auth_enabled else 'disabled'}\nLibrary: {library_path}",
+                show=True,
+            )
 
     def status_bridge(self):
         library_path = self._library_path() or "unknown"

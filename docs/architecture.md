@@ -1,58 +1,43 @@
 # Architecture
 
-## Deployed topology
+## Keeping Calibre In Charge
+
+Calibre keeps database, cache and filesystem state in memory. Running `calibredb` from another process against the same open library introduces races that SQLite locking alone cannot fix, so the MCP server lives where the authoritative state already is: inside the Calibre GUI process.
 
 ```text
 MCP client
-  ↓ Streamable HTTP: /mcp
+  -> Streamable HTTP at /mcp
 Calibre µMCP plugin (umcp.MCPServer)
-  ↓ serialized in-process calls
+  -> serialised in-process calls
 active Calibre database and library
 ```
 
-There is no sidecar. The plugin packages and uses the canonical µMCP runtime from `src/calibre_umcp/umcp.py` and exposes MCP directly from the Calibre GUI process.
+There is no sidecar and no second MCP stack. The plugin packages the canonical runtime from `src/calibre_umcp/umcp.py`, then routes tool calls through a single worker before touching `gui.current_db`.
 
-## Why in-process
+## On The Wire
 
-Calibre maintains database/cache state and filesystem layout assumptions in memory. A second process writing through `calibredb` can race the active GUI. The plugin therefore owns access to the active library.
+µMCP provides the Streamable HTTP transport at `POST /mcp`, including MCP requests and notifications for protocol versions `2025-03-26` and `2024-11-05`. The plugin adds a small `GET /health` route that returns its status and version.
 
-## Transport
+The server listens on `127.0.0.1:9000` unless configured otherwise. A non-loopback bind is rejected without `CALIBRE_UMCP_BRIDGE_TOKEN`; once set, clients authenticate with `Authorization: Bearer <token>`.
 
-The plugin uses µMCP's native Streamable HTTP implementation:
+The Calibre action owns the HTTP server lifecycle. It starts µMCP one second after plugin initialisation, giving Calibre time to load the active library; the menu can still stop or restart it. Stop shuts down the underlying HTTP server and joins that thread, and Calibre shutdown performs the same cleanup.
 
-- `POST /mcp` — MCP JSON-RPC requests and notifications
-- `GET /health` — minimal health/version response
-- MCP protocol versions supported by µMCP: `2025-03-26` and `2024-11-05`
-- default bind: `127.0.0.1:9000`
-- non-loopback binds require `CALIBRE_UMCP_BRIDGE_TOKEN`
+## Keeping Agent Context Small
 
-The Calibre GUI action starts and stops the embedded µMCP HTTP server cleanly.
+MCP still requires `initialize` and `tools/list`, but agents should begin their actual work with `capabilities_readonly`. A typical lookup is:
 
-## Context-efficient discovery
+```text
+capabilities_readonly
+  -> search_books_readonly(query, limit=20)
+  -> get_book_metadata_readonly(book_id)
+```
 
-Recommended flow:
+`describe_tool_readonly(tool_name)` provides focused guidance when an agent needs more than the compact capability summary. This is mostly about avoiding large search results--seven small tool schemas are not the expensive part.
 
-1. MCP `initialize`
-2. MCP `tools/list`
-3. `capabilities_readonly()`
-4. `bridge_status_readonly()` when status is needed
-5. `search_books_readonly(query, limit<=20)`
-6. `get_book_metadata_readonly(book_id)` for one selected result
+## The Deliberate Gap
 
-`describe_tool_readonly(tool_name)` returns focused guidance for one tool.
-
-## Safety
-
-Only implemented read-only operations are advertised through MCP. Conversion, copy, move, and email are not MCP tools until they have safe Calibre in-process job implementations.
-
-All database operations are serialized through the existing bridge worker before touching `gui.current_db`.
+The advertised tools only read the active library. Conversion, copying, moving and e-mail need explicit mappings to Calibre's `JobManager` or `ThreadedJob` APIs, with progress and failure handling visible in the GUI. Until those mappings exist, the internal bridge recognises mutation names only to reject and audit them.
 
 
-- container: `calibre`
-- image: `linuxserver/calibre:latest`
-- config: `/config`
-- library: `/books`
-- plugin directory: `/config/.config/calibre/plugins`
-- Calibre profile user: `abc` (`uid=1032`, `gid=100`)
 
-After installing/upgrading the plugin, restart or reload Calibre and select `µMCP Bridge → Start bridge`.
+After an upgrade, restart or reload Calibre. The plugin starts MCP automatically and the `µMCP Bridge` menu reports its endpoint and authentication state.
