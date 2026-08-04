@@ -33,4 +33,4 @@ The synchronous µMCP transport accepts a `server_ready` callback that hands its
 
 ## Packaging Paths
 
-`plugins/build-plugin.sh` builds from the local source tree. `plugins/install-from-gitea.sh` fetches the same six files from the Gitea mirror and assembles the ZIP inside the Calibre container, where a full checkout is unnecessary.
+`plugins/build-plugin.sh` builds from the local source tree. `plugins/install-from-gitea.sh` can fetch the same six files from a remote source and assemble the ZIP inside a Calibre container, where a full checkout is unnecessary.

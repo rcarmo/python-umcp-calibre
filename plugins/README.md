@@ -20,13 +20,9 @@ s6-setuidgid abc calibre-customize -a plugins/calibre-umcp-plugin.zip
 
 Restart or reload Calibre. The plugin starts MCP automatically after the active library loads; the `µMCP Bridge` menu can inspect, stop or restart it. MCP is at `http://<host>:9000/mcp`, with health status at `http://<host>:9000/health`.
 
+For installations without a checkout, `plugins/install-from-gitea.sh` fetches the six files from the public repository, builds `/tmp/calibre-umcp-plugin.zip` and installs it with `calibre-customize`.
 
-```sh
-CALIBRE_USER=abc
-CALIBRE_GROUP=users
-```
-
-Override `GITEA_BASE`, `WORK` or `OUT` when installing from another mirror or temporary directory.
+Override `SOURCE_BASE`, `WORK` or `OUT` when installing from another source or temporary directory.
 
 ## Binding And Authentication
 

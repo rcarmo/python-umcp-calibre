@@ -37,7 +37,3 @@ capabilities_readonly
 ## The Deliberate Gap
 
 The advertised tools only read the active library. Conversion, copying, moving and e-mail need explicit mappings to Calibre's `JobManager` or `ThreadedJob` APIs, with progress and failure handling visible in the GUI. Until those mappings exist, the internal bridge recognises mutation names only to reject and audit them.
-
-
-
-After an upgrade, restart or reload Calibre. The plugin starts MCP automatically and the `µMCP Bridge` menu reports its endpoint and authentication state.
