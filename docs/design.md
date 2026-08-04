@@ -33,6 +33,11 @@ Important implementation points:
 
 ## Implemented MCP/facade tools
 
+Progressive discovery tools, intended to minimize MCP context use:
+
+- `capabilities_readonly` — compact start-here list, read-only by default.
+- `describe_tool_readonly` — detailed guidance for one selected tool.
+
 Read-only tools:
 
 - `bridge_status_readonly`

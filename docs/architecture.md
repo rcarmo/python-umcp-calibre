@@ -31,6 +31,18 @@ The plugin is the authority for live library reads and all future writes. The si
 8. The bridge refuses to bind beyond loopback unless `CALIBRE_UMCP_BRIDGE_TOKEN` is set.
 9. Clients authenticate to `/rpc` with `Authorization: Bearer <token>` when a token is configured; `/health` is intentionally minimal and unauthenticated.
 
+## MCP progressive discovery
+
+The MCP server exposes `capabilities_readonly` as the compact entrypoint for clients and agents. Clients should call it first, then call `describe_tool_readonly` for a single selected tool only when details are needed. This avoids spending context on full tool descriptions, mutating placeholders, or large result sets before the user intent is known.
+
+Recommended flow:
+
+1. `capabilities_readonly()`
+2. `bridge_status_readonly()` if live library access is needed
+3. `list_libraries_readonly()` only when the target library is unknown
+4. `search_books_readonly(query, limit<=20)`
+5. `get_book_metadata_readonly(book_id)` for one chosen result
+
 ## Bridge API
 
 Implemented JSON-RPC methods:

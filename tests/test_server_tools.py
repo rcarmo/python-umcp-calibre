@@ -15,6 +15,29 @@ class ServerToolTests(unittest.TestCase):
         self.assertEqual(server.tool_list_libraries_readonly()["main"], "/books")
         self.assertEqual(server.tool_list_libraries()["main"], "/books")
 
+    def test_progressive_discovery_is_compact_and_readonly_by_default(self):
+        server = CalibreMCPServer()
+        capabilities = server.tool_capabilities_readonly()
+        self.assertEqual(capabilities["strategy"], "progressive-discovery")
+        names = [tool["name"] for tool in capabilities["tools"]]
+        self.assertIn("bridge_status_readonly", names)
+        self.assertIn("search_books_readonly", names)
+        self.assertNotIn("move_book_destructive", names)
+        self.assertLess(len(str(capabilities)), 3000)
+
+    def test_progressive_discovery_can_include_mutating_placeholders(self):
+        server = CalibreMCPServer()
+        names = [tool["name"] for tool in server.tool_capabilities_readonly(include_mutating=True)["tools"]]
+        self.assertIn("move_book_destructive", names)
+
+    def test_describes_one_tool_at_a_time(self):
+        server = CalibreMCPServer()
+        detail = server.tool_describe_tool_readonly("search_books_readonly")
+        self.assertEqual(detail["name"], "search_books_readonly")
+        self.assertIn("limit", detail["args"])
+        with self.assertRaises(BridgeError):
+            server.tool_describe_tool_readonly("missing")
+
     def test_mutating_tools_fail_closed_without_plugin_bridge(self):
         server = CalibreMCPServer()
         with self.assertRaises(BridgeError):

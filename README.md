@@ -61,9 +61,14 @@ PYTHONPATH=.:src python3 -W error::ResourceWarning -m unittest discover -s tests
 sh plugins/build-plugin.sh
 ```
 
-The plugin build produces `plugins/calibre-umcp-plugin.zip`. The current suite has 22 tests covering the plugin bridge, HTTP/auth behavior, MCP facade fail-closed behavior, client error wrapping, bridge lifecycle cleanup, and plugin metadata/version consistency.
+The plugin build produces `plugins/calibre-umcp-plugin.zip`. The current suite has 25 tests covering progressive discovery, the plugin bridge, HTTP/auth behavior, MCP facade fail-closed behavior, client error wrapping, bridge lifecycle cleanup, and plugin metadata/version consistency.
 
 ## MCP tools
+
+Progressive discovery tools for low context use:
+
+- `capabilities_readonly` — compact start-here list; read-only tools only by default, optional mutating placeholders with `include_mutating=true`.
+- `describe_tool_readonly` — details for one selected tool instead of dumping all schemas/descriptions.
 
 Read-only/live-safe tools:
 
