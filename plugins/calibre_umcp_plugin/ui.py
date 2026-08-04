@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 
 from calibre.gui2.actions import InterfaceAction
 from calibre.gui2 import info_dialog, error_dialog
+from .bridge import serve_bridge
 
 
 class CalibreUmcpAction(InterfaceAction):
@@ -14,7 +13,7 @@ class CalibreUmcpAction(InterfaceAction):
 
     def genesis(self):
         self.qaction.triggered.connect(self.start_bridge)
-        self._process = None
+        self._server = None
 
     def start_bridge(self):
         db = self.gui.current_db
@@ -26,14 +25,11 @@ class CalibreUmcpAction(InterfaceAction):
             return
 
         port = os.environ.get("CALIBRE_UMCP_PORT", "9000")
-        env = os.environ.copy()
-        env.setdefault("CALIBRE_LIBRARIES", f"current={library_path}")
-        env.setdefault("CALIBRE_DEFAULT_LIBRARY", "current")
-
-        cmd = [sys.executable, "-m", "calibre_umcp.server", "--host", "127.0.0.1", "--port", port, "--http"]
+        host = os.environ.get("CALIBRE_UMCP_BRIDGE_HOST", "127.0.0.1")
+        token = os.environ.get("CALIBRE_UMCP_BRIDGE_TOKEN")
         try:
-            self._process = subprocess.Popen(cmd, env=env)
+            self._server = serve_bridge(self.gui, host, int(port), token=token)
         except Exception as exc:
             error_dialog(self.gui, "Calibre µMCP Bridge", f"Failed to start bridge: {exc}", show=True)
             return
-        info_dialog(self.gui, "Calibre µMCP Bridge", f"Bridge listening on http://127.0.0.1:{port}/mcp", show=True)
+        info_dialog(self.gui, "Calibre µMCP Bridge", f"Bridge listening on http://{host}:{port}/rpc for {library_path}", show=True)
