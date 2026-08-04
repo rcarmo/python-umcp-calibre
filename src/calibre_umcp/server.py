@@ -35,6 +35,18 @@ class CalibreMCPServer(MCPServer):
         """Backward-compatible alias for older MCP clients."""
         return self.tool_list_libraries_readonly()
 
+    def tool_list_bridge_jobs_readonly(self) -> list[dict[str, Any]]:
+        """List plugin bridge job/audit records."""
+        if not self.bridge.enabled:
+            raise BridgeError("CALIBRE_UMCP_BRIDGE_URL is required to list plugin bridge jobs")
+        return self.bridge.call("list_jobs")
+
+    def tool_get_bridge_job_status_readonly(self, job_id: str) -> dict[str, Any]:
+        """Return one plugin bridge job/audit record."""
+        if not self.bridge.enabled:
+            raise BridgeError("CALIBRE_UMCP_BRIDGE_URL is required to inspect plugin bridge jobs")
+        return self.bridge.call("get_job_status", job_id=job_id)
+
     def tool_search_books_readonly(self, query: str = "", library: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         """Search/list books in a Calibre library."""
         if self.bridge.enabled:

@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from plugins.calibre_umcp_plugin.bridge import BridgeMethodError, CalibreRpcBridge
 
@@ -72,6 +75,17 @@ class CalibreRpcBridgeTests(unittest.TestCase):
         self.assertEqual(jobs[0]["method"], "move_book")
         self.assertEqual(jobs[0]["status"], "rejected")
         self.assertEqual(bridge.dispatch("get_job_status", {"job_id": jobs[0]["id"]}), jobs[0])
+
+    def test_rejected_mutation_can_write_jsonl_audit_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audit_path = Path(tmp) / "audit.jsonl"
+            bridge = CalibreRpcBridge(FakeGui(), audit_path=str(audit_path))
+            with self.assertRaises(BridgeMethodError):
+                bridge.dispatch("email_book", {"book_id": 1, "to": "reader@example.com", "token": "secret"})
+            record = json.loads(audit_path.read_text(encoding="utf-8").strip())
+            self.assertEqual(record["method"], "email_book")
+            self.assertEqual(record["status"], "rejected")
+            self.assertEqual(record["params"]["token"], "<redacted>")
 
 
 if __name__ == "__main__":

@@ -24,6 +24,13 @@ class ServerToolTests(unittest.TestCase):
         server = CalibreMCPServer()
         self.assertEqual(server.tool_bridge_status_readonly()["enabled"], False)
 
+    def test_bridge_job_tools_fail_closed_without_plugin_bridge(self):
+        server = CalibreMCPServer()
+        with self.assertRaises(BridgeError):
+            server.tool_list_bridge_jobs_readonly()
+        with self.assertRaises(BridgeError):
+            server.tool_get_bridge_job_status_readonly("missing")
+
 
 if __name__ == "__main__":
     unittest.main()

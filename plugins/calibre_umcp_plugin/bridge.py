@@ -176,8 +176,8 @@ class CalibreRpcBridge:
         return redacted
 
 
-def serve_bridge(gui, host: str, port: int, token: str | None = None):
-    bridge = CalibreRpcBridge(gui, token=token)
+def serve_bridge(gui, host: str, port: int, token: str | None = None, audit_path: str | None = None):
+    bridge = CalibreRpcBridge(gui, token=token, audit_path=audit_path)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -214,6 +214,7 @@ def serve_bridge(gui, host: str, port: int, token: str | None = None):
             return
 
     server = ThreadingHTTPServer((host, port), Handler)
+    server.bridge = bridge  # type: ignore[attr-defined]
     thread = threading.Thread(target=server.serve_forever, name="calibre-umcp-http", daemon=True)
     thread.start()
     return server
