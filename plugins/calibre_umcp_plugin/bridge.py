@@ -211,7 +211,7 @@ def serve_bridge(gui, host: str, port: int, token: str | None = None, audit_path
                 self.send_error(404)
                 return
             if token and self.headers.get("authorization") != f"Bearer {token}":
-                self.send_error(401)
+                self._write_json(401, {"jsonrpc": "2.0", "id": None, "error": {"message": "missing or invalid bearer token"}})
                 return
             request_id = None
             try:

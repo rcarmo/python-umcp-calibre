@@ -69,6 +69,8 @@ class BridgeHttpTests(unittest.TestCase):
             urllib.request.urlopen(request, timeout=5)
         try:
             self.assertEqual(caught.exception.code, 401)
+            payload = json.loads(caught.exception.read().decode())
+            self.assertEqual(payload["error"]["message"], "missing or invalid bearer token")
         finally:
             caught.exception.close()
 
