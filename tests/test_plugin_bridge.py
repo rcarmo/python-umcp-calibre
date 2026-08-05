@@ -457,6 +457,103 @@ class CalibreRpcBridgeTests(unittest.TestCase):
                 bridge.dispatch("update_book_metadata", {"book_id": 1, "changes": {}, "expected_active_library": "incoming"})
             self.assertEqual(caught.exception.code, "ACTIVE_LIBRARY_MISMATCH")
 
+    def test_three_library_runtime_integration_keeps_aliases_and_active_state_isolated(self):
+        with tempfile.TemporaryDirectory() as root:
+            paths = {
+                alias: Path(root) / parent / "Library"
+                for alias, parent in (("incoming", "one"), ("main", "two"), ("archive", "three"))
+            }
+            for path in paths.values():
+                path.mkdir(parents=True)
+                (path / "metadata.db").touch()
+            databases = {
+                alias: FakeDb(str(path), f"{alias}-id")
+                for alias, path in paths.items()
+            }
+            databases["incoming"].rows = {
+                1: FakeMetadata("Shared ISBN", ["Author A"], {"isbn": "shared"}),
+                2: FakeMetadata("Shared Title", ["Author B"]),
+            }
+            databases["main"].rows = {
+                1: FakeMetadata("Other title", ["Author A"], {"isbn": "shared"}),
+                2: FakeMetadata("Shared Title", ["Author B"]),
+            }
+            databases["archive"].rows = {
+                1: FakeMetadata("Shared ISBN", ["Author A"], {"isbn": "different"}),
+                2: FakeMetadata("Unique", ["Author C"]),
+            }
+            active_jobs = {"value": True}
+            manager = SimpleNamespace(has_jobs=lambda: active_jobs["value"])
+            gui = SimpleNamespace(
+                current_db=databases["incoming"],
+                library_broker=SimpleNamespace(
+                    get_library=lambda path: next(
+                        (db for alias, db in databases.items() if paths[alias] == Path(path)),
+                        None,
+                    )
+                ),
+                job_manager=manager,
+                proceed_question=SimpleNamespace(questions=[]),
+            )
+
+            def switch(path, allow_rebuild=False):
+                self.assertFalse(allow_rebuild)
+                gui.current_db = next(db for alias, db in databases.items() if paths[alias] == Path(path))
+
+            gui.library_moved = switch
+            registry = tuple({
+                "alias": alias,
+                "label": alias.title(),
+                "path": str(paths[alias]),
+                "read": True,
+                "switch": True,
+                "copy_destination": alias != "incoming",
+                "library_id": f"{alias}-id",
+            } for alias in ("incoming", "main", "archive"))
+            bridge = CalibreRpcBridge(gui, library_registry=registry, library_switching_enabled=True)
+
+            # Book ids overlap in all libraries, but aliases make references unambiguous.
+            main_result = bridge.dispatch("search_books", {"library": "main", "query": "", "limit": 10})
+            archive_result = bridge.dispatch("search_books", {"library": "archive", "query": "", "limit": 10})
+            self.assertEqual(main_result["items"][0]["id"], archive_result["items"][0]["id"])
+            self.assertEqual(main_result["items"][0]["library"], "main")
+            self.assertEqual(archive_result["items"][0]["library"], "archive")
+            self.assertIs(gui.current_db, databases["incoming"])
+            self.assertNotIn(str(paths["main"]), json.dumps(bridge.dispatch("list_libraries", {})))
+
+            compared = bridge.dispatch("find_cross_library_duplicates", {
+                "source_library": "incoming",
+                "target_libraries": ["main", "archive"],
+                "limit": 10,
+            })
+            reasons = {
+                reason
+                for match in compared["matches"]
+                for candidate in match["candidates"]
+                for reason in candidate["reasons"]
+            }
+            self.assertIn("identifier:isbn", reasons)
+            self.assertIn("title_authors", reasons)
+
+            with self.assertRaises(BridgeMethodError) as rejected:
+                bridge.dispatch("update_book_metadata", {"library": "main", "book_id": 1, "changes": {}})
+            self.assertEqual(rejected.exception.code, "LIBRARY_SWITCH_REQUIRED")
+
+            switch_params = {
+                "library": "main",
+                "expected_active_library": "incoming",
+                "expected_active_generation": 0,
+                "confirmation": "SWITCH_LIBRARY:main",
+            }
+            with self.assertRaises(BridgeMethodError) as blocked:
+                bridge.dispatch("switch_library", switch_params)
+            self.assertEqual(blocked.exception.code, "LIBRARY_SWITCH_BLOCKED")
+            active_jobs["value"] = False
+            switched = bridge.dispatch("switch_library", switch_params)
+            self.assertEqual(switched["active_library"], "main")
+            self.assertEqual(switched["active_generation"], 1)
+            self.assertIs(gui.current_db, databases["main"])
+
     def test_serialized_calls_are_handed_to_gui_dispatcher(self):
         gui_calls = queue.Queue()
         bridge = CalibreRpcBridge(FakeGui(), gui_dispatch=lambda *args: gui_calls.put(args))
