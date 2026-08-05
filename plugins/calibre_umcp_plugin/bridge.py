@@ -27,6 +27,8 @@ from urllib.parse import urlparse
 
 
 BRIDGE_VERSION = PLUGIN_VERSION_STRING
+SCHEMA_VERSION = 2
+TOOLSET_VERSION = 2
 SUPPORTED_CALIBRE_MUTATION_VERSION = (9, 12, 0)
 
 
@@ -44,6 +46,8 @@ STABLE_READ_ERRORS = frozenset({
     "BOOK_NOT_FOUND",
     "CALIBRE_READ_FAILED",
     "CURSOR_INVALID",
+    "CROSS_LIBRARY_SAME_LIBRARY",
+    "CROSS_LIBRARY_TARGETS_REQUIRED",
     "LIBRARY_ALIAS_UNKNOWN",
     "LIBRARY_IDENTITY_MISMATCH",
     "LIBRARY_READ_DENIED",
@@ -94,6 +98,7 @@ class CalibreRpcBridge:
         destination_libraries: tuple[str, ...] = (),
         library_registry: tuple[dict[str, object], ...] = (),
         library_switching_enabled: bool = False,
+        content_server_advertised_host: str = "",
         conversion_adapter=None,
         import_adapter=None,
         threaded_job_factory=None,
@@ -114,6 +119,7 @@ class CalibreRpcBridge:
         self.destination_libraries = tuple(Path(root).expanduser().resolve() for root in destination_libraries)
         self.library_registry = tuple(dict(entry) for entry in library_registry)
         self.library_switching_enabled = bool(library_switching_enabled)
+        self.content_server_advertised_host = str(content_server_advertised_host or "").strip()
         self.active_generation = 0
         self._conversion_adapter = conversion_adapter
         self._import_adapter = import_adapter
@@ -324,7 +330,23 @@ class CalibreRpcBridge:
             })
         if active == "current" and active not in seen:
             libraries.insert(0, {"alias": "current", "label": "Current library", "active": True, "available": True, "readable": True, "switchable": False, "copy_destination": False})
-        return {"active_library": active, "active_generation": self.active_generation, "libraries": libraries}
+        configured_targets = [item for item in libraries if not item["active"] and item["readable"]]
+        available_targets = [item for item in configured_targets if item["available"]]
+        reason_code = None
+        if not configured_targets:
+            reason_code = "NO_TARGET_LIBRARIES_CONFIGURED"
+        elif not available_targets:
+            reason_code = "NO_TARGET_LIBRARIES_AVAILABLE"
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "active_library": active,
+            "active_generation": self.active_generation,
+            "libraries": libraries,
+            "cross_library_configured": bool(configured_targets),
+            "cross_library_available": bool(available_targets),
+            "readable_target_count": len(available_targets),
+            "cross_library_reason_code": reason_code,
+        }
 
     @staticmethod
     def _cursor_fingerprint(label: str, arguments: dict[str, Any]) -> str:
@@ -406,31 +428,42 @@ class CalibreRpcBridge:
             )
         )
         if not running:
-            return {"running": False, "authenticated": False, "base_url": None, "temporary_links_supported": False}
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "running": False,
+                "authenticated": False,
+                "base_url": None,
+                "temporary_links_supported": False,
+                "reason_code": "CONTENT_SERVER_NOT_RUNNING",
+            }
         options = getattr(server, "opts", None)
         authenticated = bool(getattr(options, "auth", False))
         address = getattr(loop, "bound_address", None) or getattr(loop, "bind_address", None)
         host = str(address[0]) if isinstance(address, (tuple, list)) and address else ""
         port = int(address[1]) if isinstance(address, (tuple, list)) and len(address) > 1 else int(getattr(options, "port", 0) or 0)
         concrete_host = host not in {"", "0.0.0.0", "::", "::0"}
+        advertised_host = host if concrete_host else self.content_server_advertised_host
         base_url = None
-        if authenticated and concrete_host and port:
-            if ":" in host and not host.startswith("["):
-                host = f"[{host}]"
+        if authenticated and advertised_host and port:
+            if ":" in advertised_host and not advertised_host.startswith("["):
+                advertised_host = f"[{advertised_host}]"
             scheme = "https" if getattr(options, "ssl_certfile", None) else "http"
             prefix = str(getattr(options, "url_prefix", "") or "").strip("/")
-            base_url = f"{scheme}://{host}:{port}" + (f"/{prefix}" if prefix else "")
-        reason = None
+            base_url = f"{scheme}://{advertised_host}:{port}" + (f"/{prefix}" if prefix else "")
+        reason_code = None
         if not authenticated:
-            reason = "Content server authentication is disabled; no URL is exposed"
-        elif not concrete_host:
-            reason = "Content server listens on a wildcard address; configure a concrete advertised host before exposing a URL"
+            reason_code = "CONTENT_SERVER_AUTH_DISABLED"
+        elif not advertised_host:
+            reason_code = "ADVERTISED_CONTENT_SERVER_HOST_NOT_CONFIGURED"
+        elif not port:
+            reason_code = "CONTENT_SERVER_PORT_UNAVAILABLE"
         return {
+            "schema_version": SCHEMA_VERSION,
             "running": True,
             "authenticated": authenticated,
             "base_url": base_url,
             "temporary_links_supported": False,
-            "reason": reason,
+            "reason_code": reason_code,
         }
 
     @staticmethod
@@ -499,10 +532,10 @@ class CalibreRpcBridge:
         source_db, source_alias = self._resolve_library(params.get("source_library"))
         targets = params.get("target_libraries")
         if not isinstance(targets, list) or not targets or len(targets) > 16:
-            raise BridgeMethodError("LIBRARY_ALIAS_UNKNOWN", "One to sixteen target library aliases are required")
+            raise BridgeMethodError("CROSS_LIBRARY_TARGETS_REQUIRED", "One to sixteen target library aliases are required")
         target_pairs = [self._resolve_library(alias) for alias in targets]
         if source_alias in {alias for _db, alias in target_pairs}:
-            raise BridgeMethodError("LIBRARY_ALIAS_UNKNOWN", "Source and target libraries must differ")
+            raise BridgeMethodError("CROSS_LIBRARY_SAME_LIBRARY", "Source and target libraries must differ")
         limit = max(1, min(int(params.get("limit") or 100), 500))
         per_book = max(1, min(int(params.get("candidate_limit_per_book") or 20), 100))
         query = str(params.get("source_query") or "")

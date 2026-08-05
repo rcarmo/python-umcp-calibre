@@ -6,6 +6,8 @@ from typing import Any
 
 from .bridge import (
     BRIDGE_VERSION,
+    SCHEMA_VERSION,
+    TOOLSET_VERSION,
     STABLE_MUTATION_ERRORS,
     STABLE_READ_ERRORS,
     BridgeMethodError,
@@ -71,11 +73,17 @@ class CalibrePluginMCPServer(MCPServer):
             destination_libraries=tuple(getattr(policy, "destination_libraries", ()) or ()),
             library_registry=tuple(getattr(policy, "library_registry", ()) or ()),
             library_switching_enabled=bool(getattr(policy, "library_switching_enabled", False)),
+            content_server_advertised_host=str(getattr(policy, "content_server_advertised_host", "") or ""),
         )
 
     def get_config(self) -> dict[str, Any]:
         config = super().get_config()
-        config["serverInfo"] = {"name": "calibre-umcp", "version": BRIDGE_VERSION}
+        config["serverInfo"] = {
+            "name": "calibre-umcp",
+            "version": BRIDGE_VERSION,
+            "schemaVersion": str(SCHEMA_VERSION),
+            "toolsetVersion": str(TOOLSET_VERSION),
+        }
         config["capabilities"] = {"tools": {"listChanged": False}}
         return config
 
@@ -108,7 +116,12 @@ class CalibrePluginMCPServer(MCPServer):
 
     def handle_http_request(self, *, method: str, path: str, headers, body: bytes, peer: str | None) -> MCPHTTPResponse | None:
         if method == "GET" and path == "/health":
-            payload = json.dumps({"ok": True, "version": BRIDGE_VERSION}).encode("utf-8")
+            payload = json.dumps({
+                "ok": True,
+                "version": BRIDGE_VERSION,
+                "schema_version": SCHEMA_VERSION,
+                "toolset_version": TOOLSET_VERSION,
+            }).encode("utf-8")
             return MCPHTTPResponse(status=200, body=payload, content_type="application/json")
         return None
 
@@ -138,17 +151,24 @@ class CalibrePluginMCPServer(MCPServer):
 
     def tool_capabilities_readonly(self) -> dict[str, Any]:
         """Compact progressive-discovery entrypoint; call before listing or invoking detailed tools."""
+        library_status = self._call_read("list_libraries", {})
         return {
+            "schema_version": SCHEMA_VERSION,
+            "toolset_version": TOOLSET_VERSION,
             "strategy": "progressive-discovery",
-            "start_here": ["bridge_status_readonly", "search_books_readonly"],
-            "guidance": "Discover library aliases, search with limit <=20, then fetch one selected library-scoped id.",
+            "start_here": ["bridge_status_readonly", "list_libraries_readonly", "search_books_readonly"],
+            "guidance": "Discover library aliases, search with limit <=20, then fetch one selected library-scoped id. Reconnect after a server toolset_version change.",
             "cross_library_reads": True,
+            "cross_library_configured": library_status["cross_library_configured"],
+            "cross_library_available": library_status["cross_library_available"],
+            "readable_target_count": library_status["readable_target_count"],
+            "cross_library_reason_code": library_status["cross_library_reason_code"],
             "inactive_library_mutations": False,
             "stable_errors": sorted(STABLE_READ_ERRORS),
             "limits": {"search": 500, "duplicates": 5000, "cross_library_source": 500, "cross_library_candidates": 2000},
             "tools": [
                 {"name": "bridge_status_readonly", "summary": "Plugin and active-library status."},
-                {"name": "list_libraries_readonly", "summary": "Active Calibre library."},
+                {"name": "list_libraries_readonly", "summary": "Redacted configured aliases and current cross-library availability."},
                 {"name": "search_books_readonly", "summary": "Bounded Calibre search."},
                 {"name": "get_book_metadata_readonly", "summary": "Metadata for one book id."},
                 {"name": "find_duplicates_readonly", "summary": "Probable duplicate groups in one selected library."},
@@ -250,7 +270,12 @@ class CalibrePluginMCPServer(MCPServer):
         """Report plugin version and active Calibre library."""
         status = self._call_read("ping", {})
         status.pop("library_path", None)
-        status.update({"active_library": self.bridge._active_alias(), "active_generation": self.bridge.active_generation})
+        status.update({
+            "schema_version": SCHEMA_VERSION,
+            "toolset_version": TOOLSET_VERSION,
+            "active_library": self.bridge._active_alias(),
+            "active_generation": self.bridge.active_generation,
+        })
         return status
 
     def tool_list_libraries_readonly(self) -> dict[str, Any]:

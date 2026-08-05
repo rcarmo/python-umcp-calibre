@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -23,6 +24,7 @@ class BridgeSettings:
     destination_libraries: tuple[str, ...]
     library_registry: tuple[dict[str, object], ...]
     library_switching_enabled: bool
+    content_server_advertised_host: str
     audit_path: str | None
     audit_retention: int
 
@@ -39,6 +41,7 @@ def config() -> JSONConfig:
         "destination_libraries": "",
         "library_registry": "[]",
         "library_switching_enabled": False,
+        "content_server_advertised_host": "",
         "audit_path": "",
         "audit_retention": 500,
     })
@@ -88,6 +91,21 @@ def _library_registry(value: str) -> tuple[dict[str, object], ...]:
     return tuple(entries)
 
 
+def _advertised_host(value: str) -> str:
+    host = str(value or "").strip().strip("[]")
+    if not host:
+        return ""
+    valid = False
+    try:
+        ipaddress.ip_address(host)
+        valid = True
+    except ValueError:
+        valid = bool(re.fullmatch(r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", host))
+    if not valid:
+        raise ValueError("Content-server advertised host must be a hostname or IP address without a scheme, port, or path")
+    return host
+
+
 def load_settings(environ=None) -> BridgeSettings:
     environ = os.environ if environ is None else environ
     prefs = config()
@@ -112,6 +130,9 @@ def load_settings(environ=None) -> BridgeSettings:
         destination_libraries=_paths(str(prefs["destination_libraries"] or "")),
         library_registry=_library_registry(str(prefs["library_registry"] or "[]")),
         library_switching_enabled=bool(prefs["library_switching_enabled"]),
+        content_server_advertised_host=_advertised_host(
+            str(environ.get("CALIBRE_UMCP_CONTENT_SERVER_ADVERTISED_HOST") or prefs["content_server_advertised_host"] or "")
+        ),
         audit_path=audit_path,
         audit_retention=max(10, min(int(prefs["audit_retention"] or 500), 10000)),
     )

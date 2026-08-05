@@ -85,6 +85,24 @@ class PluginConfigTests(unittest.TestCase):
         self.assertNotIn("~", settings.library_registry[0]["path"])
         self.assertTrue(settings.library_switching_enabled)
 
+    def test_content_server_advertised_host_accepts_host_only_and_environment_override(self):
+        prefs = self.config_module.config()
+        prefs["content_server_advertised_host"] = "books.example.test"
+        settings = self.config_module.load_settings(environ={})
+        self.assertEqual(settings.content_server_advertised_host, "books.example.test")
+        overridden = self.config_module.load_settings(
+            environ={"CALIBRE_UMCP_CONTENT_SERVER_ADVERTISED_HOST": "192.0.2.10"}
+        )
+        self.assertEqual(overridden.content_server_advertised_host, "192.0.2.10")
+        ipv6 = self.config_module.load_settings(
+            environ={"CALIBRE_UMCP_CONTENT_SERVER_ADVERTISED_HOST": "[2001:db8::10]"}
+        )
+        self.assertEqual(ipv6.content_server_advertised_host, "2001:db8::10")
+        for invalid in ("https://books.example.test/path", "books.example.test:8080"):
+            prefs["content_server_advertised_host"] = invalid
+            with self.assertRaisesRegex(ValueError, "hostname or IP"):
+                self.config_module.load_settings(environ={})
+
     def test_library_registry_rejects_invalid_or_duplicate_aliases(self):
         prefs = self.config_module.config()
         prefs["library_registry"] = '[{"alias":"Main Library","path":"/a"}]'

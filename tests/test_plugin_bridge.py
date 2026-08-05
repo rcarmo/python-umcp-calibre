@@ -368,7 +368,9 @@ class CalibreRpcBridgeTests(unittest.TestCase):
     def test_content_server_url_is_exposed_only_when_running_and_authenticated(self):
         gui = FakeGui()
         bridge = CalibreRpcBridge(gui)
-        self.assertIsNone(bridge.dispatch("content_server_status", {})["base_url"])
+        stopped = bridge.dispatch("content_server_status", {})
+        self.assertIsNone(stopped["base_url"])
+        self.assertEqual(stopped["reason_code"], "CONTENT_SERVER_NOT_RUNNING")
         gui.content_server = type(
             "Server",
             (),
@@ -381,10 +383,20 @@ class CalibreRpcBridgeTests(unittest.TestCase):
         )()
         status = bridge.dispatch("content_server_status", {})
         self.assertEqual(status["base_url"], "http://127.0.0.1:8080/books")
+        self.assertIsNone(status["reason_code"])
         self.assertFalse(status["temporary_links_supported"])
         gui.content_server.opts.auth = False
-        self.assertIsNone(bridge.dispatch("content_server_status", {})["base_url"])
+        unauthenticated = bridge.dispatch("content_server_status", {})
+        self.assertIsNone(unauthenticated["base_url"])
+        self.assertEqual(unauthenticated["reason_code"], "CONTENT_SERVER_AUTH_DISABLED")
         gui.content_server.opts.auth = True
+        gui.content_server.loop.bound_address = ("0.0.0.0", 8080)
+        wildcard = bridge.dispatch("content_server_status", {})
+        self.assertIsNone(wildcard["base_url"])
+        self.assertEqual(wildcard["reason_code"], "ADVERTISED_CONTENT_SERVER_HOST_NOT_CONFIGURED")
+        advertised = CalibreRpcBridge(gui, content_server_advertised_host="books.example.test").dispatch("content_server_status", {})
+        self.assertEqual(advertised["base_url"], "http://books.example.test:8080/books")
+        self.assertIsNone(advertised["reason_code"])
         gui.content_server.is_running = False
         self.assertFalse(bridge.dispatch("content_server_status", {})["running"])
 
@@ -421,6 +433,10 @@ class CalibreRpcBridgeTests(unittest.TestCase):
             bridge = CalibreRpcBridge(gui, library_registry=registry)
             listed = bridge.dispatch("list_libraries", {})
             self.assertEqual(listed["active_library"], "incoming")
+            self.assertTrue(listed["cross_library_configured"])
+            self.assertTrue(listed["cross_library_available"])
+            self.assertEqual(listed["readable_target_count"], 1)
+            self.assertIsNone(listed["cross_library_reason_code"])
             self.assertNotIn(str(main_path), json.dumps(listed))
             searched = bridge.dispatch("search_books", {"library": "main", "query": "Example", "limit": 10})
             self.assertEqual(searched["library"], "main")
@@ -431,6 +447,41 @@ class CalibreRpcBridgeTests(unittest.TestCase):
             reasons = {reason for match in compared["matches"] for candidate in match["candidates"] for reason in candidate["reasons"]}
             self.assertIn("identifier:isbn", reasons)
             self.assertIn("title_authors", reasons)
+            with self.assertRaises(BridgeMethodError) as empty_targets:
+                bridge.dispatch("find_cross_library_duplicates", {"source_library": "incoming", "target_libraries": []})
+            self.assertEqual(empty_targets.exception.code, "CROSS_LIBRARY_TARGETS_REQUIRED")
+            with self.assertRaises(BridgeMethodError) as same_library:
+                bridge.dispatch("find_cross_library_duplicates", {"source_library": "incoming", "target_libraries": ["incoming"]})
+            self.assertEqual(same_library.exception.code, "CROSS_LIBRARY_SAME_LIBRARY")
+            with self.assertRaises(BridgeMethodError) as unknown:
+                bridge.dispatch("find_cross_library_duplicates", {"source_library": "incoming", "target_libraries": ["missing"]})
+            self.assertEqual(unknown.exception.code, "LIBRARY_ALIAS_UNKNOWN")
+
+    def test_cross_library_availability_distinguishes_unconfigured_unavailable_and_unreadable(self):
+        bridge = CalibreRpcBridge(FakeGui())
+        status = bridge.dispatch("list_libraries", {})
+        self.assertFalse(status["cross_library_configured"])
+        self.assertFalse(status["cross_library_available"])
+        self.assertEqual(status["cross_library_reason_code"], "NO_TARGET_LIBRARIES_CONFIGURED")
+        with tempfile.TemporaryDirectory() as root:
+            active_path = Path(root) / "active"
+            missing_path = Path(root) / "missing"
+            denied_path = Path(root) / "denied"
+            active_path.mkdir()
+            denied_path.mkdir()
+            (active_path / "metadata.db").touch()
+            (denied_path / "metadata.db").touch()
+            gui = SimpleNamespace(current_db=FakeDb(str(active_path), "active-id"))
+            registry = (
+                {"alias": "active", "path": str(active_path), "read": True},
+                {"alias": "missing", "path": str(missing_path), "read": True},
+                {"alias": "denied", "path": str(denied_path), "read": False},
+            )
+            configured = CalibreRpcBridge(gui, library_registry=registry).dispatch("list_libraries", {})
+            self.assertTrue(configured["cross_library_configured"])
+            self.assertFalse(configured["cross_library_available"])
+            self.assertEqual(configured["readable_target_count"], 0)
+            self.assertEqual(configured["cross_library_reason_code"], "NO_TARGET_LIBRARIES_AVAILABLE")
 
     def test_switch_library_is_explicit_guarded_and_increments_generation(self):
         with tempfile.TemporaryDirectory() as root:

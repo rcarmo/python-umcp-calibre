@@ -43,7 +43,11 @@ CALIBRE_UMCP_BRIDGE_TOKEN=<long-random-token>
 
 The plugin publishes Streamable HTTP at `POST /mcp` and a small unauthenticated `GET /health` endpoint. A non-loopback bind is refused without `CALIBRE_UMCP_BRIDGE_TOKEN`. If a token is configured at all, clients send `Authorization: Bearer <token>` on `/mcp`, even on loopback.
 
+`CALIBRE_UMCP_CONTENT_SERVER_ADVERTISED_HOST` may provide a hostname or IP address (without scheme, port, or path) when Calibre's authenticated content server binds to a wildcard address. Without it, `content_server_status_readonly()` returns no URL and the stable reason code `ADVERTISED_CONTENT_SERVER_HOST_NOT_CONFIGURED`.
+
 `CALIBRE_UMCP_AUDIT_PATH` may point to a redacted JSONL audit file for bridge job records. The UI also stores an in-memory audit retention value between 10 and 10000 records, defaulting to 500. Long-running native work still appears in Calibre's own Jobs UI; `list_bridge_jobs_readonly()` is the bridge ledger.
+
+MCP clients should reconnect and refresh `tools/list` after plugin upgrades whenever `toolset_version` changes; gateways may otherwise retain an older tool catalogue.
 
 ## Mutation Gate And Current Limits
 

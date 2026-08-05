@@ -116,6 +116,7 @@ class CalibreUmcpAction(InterfaceAction):
         library_registry = QPlainTextEdit(str(prefs["library_registry"] or "[]"), dialog)
         switching = QCheckBox("Enable explicit library switching", dialog)
         switching.setChecked(bool(prefs["library_switching_enabled"]))
+        content_server_host = QLineEdit(str(prefs["content_server_advertised_host"] or ""), dialog)
         audit_path = QLineEdit(str(prefs["audit_path"] or ""), dialog)
         retention = QSpinBox(dialog)
         retention.setRange(10, 10000)
@@ -130,6 +131,7 @@ class CalibreUmcpAction(InterfaceAction):
         form.addRow("Destination libraries (one per line, deprecated)", destinations)
         form.addRow("Library registry (JSON array)", library_registry)
         form.addRow("Library switching", switching)
+        form.addRow("Content-server advertised host", content_server_host)
         form.addRow("Audit JSONL path", audit_path)
         form.addRow("Audit records retained", retention)
 
@@ -152,6 +154,7 @@ class CalibreUmcpAction(InterfaceAction):
         prefs["destination_libraries"] = destinations.toPlainText().strip()
         prefs["library_registry"] = library_registry.toPlainText().strip() or "[]"
         prefs["library_switching_enabled"] = bool(switching.isChecked())
+        prefs["content_server_advertised_host"] = content_server_host.text().strip()
         prefs["audit_path"] = audit_path.text().strip()
         prefs["audit_retention"] = retention.value()
         prefs.commit()

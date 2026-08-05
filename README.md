@@ -6,11 +6,11 @@ For the released plugin path, the MCP client talks straight to the Calibre GUI p
 
 ## What It Exposes
 
-Read-only discovery is small on purpose. Agents should start with `capabilities_readonly()`, then `list_libraries_readonly()`, then `search_books_readonly(query="", library="current", limit=20)`. Read results use bounded object envelopes with canonical aliases, stable ordering, truncation metadata and opaque cursors. The rest of the read-only surface is:
+Read-only discovery is small on purpose. Agents should start with `capabilities_readonly()`, then `list_libraries_readonly()`, then `search_books_readonly(query="", library="current", limit=20)`. Read results use bounded object envelopes with canonical aliases, stable ordering, truncation metadata and opaque cursors. Capability and status responses include `schema_version` and `toolset_version`; clients should reconnect and refresh `tools/list` whenever the server's toolset version changes. The rest of the read-only surface is:
 
 * `describe_tool_readonly(tool_name)` expands one implemented tool at a time instead of dumping every schema into context.
 * `bridge_status_readonly()` reports the bridge version, active alias and active generation without exposing library paths.
-* `list_libraries_readonly()` returns only UI-configured aliases, labels, availability and policy flags.
+* `list_libraries_readonly()` returns only UI-configured aliases, labels, availability and policy flags. It also distinguishes configured from currently usable cross-library access through `cross_library_configured`, `cross_library_available`, `readable_target_count`, and `cross_library_reason_code`.
 * `get_book_metadata_readonly(book_id, library="current")` returns a scoped `{library, book_id}` reference.
 * `find_duplicates_readonly(library="current", limit=1000)` groups probable duplicates through Calibre's 9.12 `new_api.all_book_ids()` enumeration.
 * `find_cross_library_duplicates_readonly(source_library, target_libraries, limit=100)` compares configured libraries by normalized identifiers and title/authors without switching the visible GUI library.
@@ -96,7 +96,7 @@ CALIBRE_UMCP_PORT=9000
 CALIBRE_UMCP_BRIDGE_TOKEN=<long-random-token>
 ```
 
-A non-loopback bind is refused without `CALIBRE_UMCP_BRIDGE_TOKEN`. If a token is configured at all, MCP clients send `Authorization: Bearer <token>` to `POST /mcp`; `GET /health` stays unauthenticated. In container deployments that environment token only authenticates `/mcp`. Mutations stay hidden until you open the plugin's Configure bridge dialog inside Calibre, save the same token there, and check Enable implemented mutation tools. `CALIBRE_UMCP_AUDIT_PATH` may point to a redacted JSONL audit file for bridge job records, and long-running native work still appears in Calibre's own Jobs UI while `list_bridge_jobs_readonly()` remains the bridge ledger.
+A non-loopback bind is refused without `CALIBRE_UMCP_BRIDGE_TOKEN`. If a token is configured at all, MCP clients send `Authorization: Bearer <token>` to `POST /mcp`; `GET /health` stays unauthenticated. In container deployments that environment token only authenticates `/mcp`. When Calibre's content server listens on a wildcard address, set `CALIBRE_UMCP_CONTENT_SERVER_ADVERTISED_HOST` to a hostname or IP address (without a scheme, port, or path) if `content_server_status_readonly()` should return an actionable URL. Stable `reason_code` values explain every withheld URL. Mutations stay hidden until you open the plugin's Configure bridge dialog inside Calibre, save the same token there, and check Enable implemented mutation tools. `CALIBRE_UMCP_AUDIT_PATH` may point to a redacted JSONL audit file for bridge job records, and long-running native work still appears in Calibre's own Jobs UI while `list_bridge_jobs_readonly()` remains the bridge ledger.
 
 ## Compatibility Paths
 

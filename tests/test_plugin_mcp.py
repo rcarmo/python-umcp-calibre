@@ -77,6 +77,8 @@ class PluginMCPTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "calibre-umcp")
+        self.assertEqual(initialized["result"]["serverInfo"]["schemaVersion"], "2")
+        self.assertEqual(initialized["result"]["serverInfo"]["toolsetVersion"], "2")
         self.assertEqual(initialized["result"]["capabilities"], {"tools": {"listChanged": False}})
 
         _, listed = self.post(base, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
@@ -92,6 +94,19 @@ class PluginMCPTests(unittest.TestCase):
         search_schema = tools["search_books_readonly"]["inputSchema"]["properties"]
         self.assertIn("library", search_schema)
         self.assertIn("cursor", search_schema)
+
+        _, capabilities = self.post(
+            base,
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "capabilities_readonly", "arguments": {}}},
+        )
+        content = capabilities["result"]["structuredContent"]
+        self.assertEqual(content["schema_version"], 2)
+        self.assertEqual(content["toolset_version"], 2)
+        self.assertFalse(content["cross_library_configured"])
+        self.assertFalse(content["cross_library_available"])
+        self.assertEqual(content["readable_target_count"], 0)
+        self.assertEqual(content["cross_library_reason_code"], "NO_TARGET_LIBRARIES_CONFIGURED")
+        self.assertIn("Reconnect", content["guidance"])
 
     def test_calls_live_plugin_tool_through_umcp(self):
         base = self.start_server()
