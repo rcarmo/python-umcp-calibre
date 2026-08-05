@@ -76,6 +76,24 @@ class PluginConfigTests(unittest.TestCase):
         self.assertTrue(settings.ui_token_configured)
         self.assertFalse(settings.mutations_enabled)
 
+    def test_library_registry_is_normalised_and_switching_is_separate_policy(self):
+        prefs = self.config_module.config()
+        prefs["library_registry"] = '[{"alias":"main","label":"Main","path":"~/Books","read":true,"switch":true}]'
+        prefs["library_switching_enabled"] = True
+        settings = self.config_module.load_settings(environ={})
+        self.assertEqual(settings.library_registry[0]["alias"], "main")
+        self.assertNotIn("~", settings.library_registry[0]["path"])
+        self.assertTrue(settings.library_switching_enabled)
+
+    def test_library_registry_rejects_invalid_or_duplicate_aliases(self):
+        prefs = self.config_module.config()
+        prefs["library_registry"] = '[{"alias":"Main Library","path":"/a"}]'
+        with self.assertRaisesRegex(ValueError, "Invalid library alias"):
+            self.config_module.load_settings(environ={})
+        prefs["library_registry"] = '[{"alias":"main","path":"/a"},{"alias":"main","path":"/b"}]'
+        with self.assertRaisesRegex(ValueError, "unique"):
+            self.config_module.load_settings(environ={})
+
 
 if __name__ == "__main__":
     unittest.main()

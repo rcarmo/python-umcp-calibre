@@ -15,6 +15,21 @@ from test_plugin_bridge import FakeGui
 
 
 class PluginMCPTests(unittest.TestCase):
+    GUARDED_MUTATION_TOOLS = (
+        "update_book_metadata_mutation",
+        "add_book_format_mutation",
+        "delete_book_format_mutation",
+        "set_book_cover_mutation",
+        "add_book_mutation",
+        "delete_books_mutation",
+        "merge_duplicates_mutation",
+        "convert_book_mutation",
+        "copy_books_to_library_mutation",
+        "move_books_to_library_mutation",
+        "save_book_to_disk_mutation",
+        "email_book_mutation",
+    )
+
     def tearDown(self):
         server = getattr(self, "server", None)
         if server is not None:
@@ -27,6 +42,13 @@ class PluginMCPTests(unittest.TestCase):
         self.server = serve_mcp(FakeGui(), "127.0.0.1", 0, token=token)
         host, port = self.server.server_address
         return f"http://{host}:{port}"
+
+    def make_mutation_server(self):
+        server = CalibrePluginMCPServer(
+            FakeGui(), token="ui-token", ui_token_configured=True, mutations_enabled=True
+        )
+        self.addCleanup(server.bridge.close)
+        return server
 
     def post(self, base, payload, token=None, initialized=True):
         headers = {"content-type": "application/json", "accept": "application/json"}
@@ -65,11 +87,11 @@ class PluginMCPTests(unittest.TestCase):
         for tool in tools.values():
             if "outputSchema" in tool:
                 self.assertEqual(tool["outputSchema"]["type"], "object")
-        for tool_name in ("search_books_readonly", "find_duplicates_readonly", "list_bridge_jobs_readonly"):
-            output_schema = tools[tool_name]["outputSchema"]
-            self.assertEqual(output_schema["type"], "object")
-            self.assertEqual(output_schema["required"], ["items"])
-            self.assertEqual(output_schema["properties"]["items"]["type"], "array")
+        for tool_name in ("search_books_readonly", "find_duplicates_readonly", "find_cross_library_duplicates_readonly", "list_bridge_jobs_readonly"):
+            self.assertEqual(tools[tool_name]["outputSchema"]["type"], "object")
+        search_schema = tools["search_books_readonly"]["inputSchema"]["properties"]
+        self.assertIn("library", search_schema)
+        self.assertIn("cursor", search_schema)
 
     def test_calls_live_plugin_tool_through_umcp(self):
         base = self.start_server()
@@ -83,7 +105,7 @@ class PluginMCPTests(unittest.TestCase):
             },
         )
         self.assertEqual(called["result"]["structuredContent"]["items"][0]["id"], 1)
-        self.assertEqual(json.loads(called["result"]["content"][0]["text"])[0]["id"], 1)
+        self.assertEqual(json.loads(called["result"]["content"][0]["text"])["items"][0]["id"], 1)
 
     def test_mutation_discovery_requires_ui_token_and_explicit_policy(self):
         disabled = CalibrePluginMCPServer(
@@ -114,6 +136,72 @@ class PluginMCPTests(unittest.TestCase):
         described = enabled.tool_describe_tool_readonly("update_book_metadata_mutation")
         self.assertIn("changes", described["arguments"])
         self.assertEqual(described["args"], described["arguments"])
+
+    def test_mutation_tools_expose_optional_active_library_guards_in_schema(self):
+        server = self.make_mutation_server()
+        tools = {tool["name"]: tool for tool in server.discover_tools()["tools"]}
+
+        for tool_name in self.GUARDED_MUTATION_TOOLS:
+            schema = tools[tool_name]["inputSchema"]
+            props = schema["properties"]
+            self.assertEqual(props["expected_active_library"]["type"], "string")
+            self.assertEqual(props["expected_active_generation"]["type"], "integer")
+            self.assertNotIn("expected_active_library", schema.get("required", []))
+            self.assertNotIn("expected_active_generation", schema.get("required", []))
+
+        described = server.tool_describe_tool_readonly("update_book_metadata_mutation")
+        self.assertIn("expected_active_library", described["arguments"])
+        self.assertIn("expected_active_generation", described["arguments"])
+
+    def test_mutation_tools_forward_optional_active_library_guards(self):
+        server = self.make_mutation_server()
+        cases = (
+            ("update_book_metadata", lambda: server.tool_update_book_metadata_mutation(1, {"title": "Updated"}, expected_active_library="current", expected_active_generation=7)),
+            ("add_book_format", lambda: server.tool_add_book_format_mutation(1, "/tmp/book.epub", format="EPUB", replace=True, expected_active_library="current", expected_active_generation=7)),
+            ("delete_book_format", lambda: server.tool_delete_book_format_mutation(1, "EPUB", allow_last_format=True, expected_active_library="current", expected_active_generation=7)),
+            ("set_book_cover", lambda: server.tool_set_book_cover_mutation(1, "/tmp/cover.jpg", expected_active_library="current", expected_active_generation=7)),
+            ("add_book", lambda: server.tool_add_book_mutation("/tmp/book.epub", format="EPUB", duplicate_policy="add", expected_active_library="current", expected_active_generation=7)),
+            ("delete_books", lambda: server.tool_delete_books_mutation([1], dry_run=False, confirmation="confirmed", permanent=True, expected_active_library="current", expected_active_generation=7)),
+            ("merge_duplicates", lambda: server.tool_merge_duplicates_mutation(1, [2], "MERGE_KEEP_SOURCES", replace_cover=True, save_alternate_cover=True, expected_active_library="current", expected_active_generation=7)),
+            ("convert_book", lambda: server.tool_convert_book_mutation(1, "AZW3", replace_existing=True, options={"profile": "generic_eink"}, store_result=False, export_path="/tmp/book.azw3", overwrite_export=True, expected_active_library="current", expected_active_generation=7)),
+            ("copy_books_to_library", lambda: server.tool_copy_books_to_library_mutation([1], "main", duplicate_policy="merge_missing", destination_book_ids={"1": 1001}, expected_active_library="current", expected_active_generation=7)),
+            ("move_books_to_library", lambda: server.tool_move_books_to_library_mutation([1], "main", dry_run=False, confirmation="confirmed", duplicate_policy="replace", destination_book_ids={"1": 1001}, expected_active_library="current", expected_active_generation=7)),
+            ("save_book_to_disk", lambda: server.tool_save_book_to_disk_mutation(1, "/tmp/export", options={"single_dir": True}, overwrite=True, expected_active_library="current", expected_active_generation=7)),
+            ("email_book", lambda: server.tool_email_book_mutation(1, "reader@example.com", "EPUB", expected_active_library="current", expected_active_generation=7)),
+        )
+
+        with patch.object(
+            server.bridge,
+            "call_serialized",
+            side_effect=lambda method, params: {"method": method, "params": params},
+        ):
+            for method_name, invoke in cases:
+                forwarded = invoke()
+                self.assertEqual(forwarded["method"], method_name)
+                self.assertEqual(forwarded["params"]["expected_active_library"], "current")
+                self.assertEqual(forwarded["params"]["expected_active_generation"], 7)
+
+            unguarded = server.tool_update_book_metadata_mutation(1, {"title": "Updated"})
+            self.assertNotIn("expected_active_library", unguarded["params"])
+            self.assertNotIn("expected_active_generation", unguarded["params"])
+
+    def test_mutation_tool_stale_active_generation_guard_is_enforced(self):
+        server = self.make_mutation_server()
+        completed = server.tool_update_book_metadata_mutation(
+            1,
+            {"title": "Updated"},
+            expected_active_library="current",
+            expected_active_generation=0,
+        )
+        self.assertEqual(completed["status"], "completed")
+
+        for invoke in (
+            lambda: server.tool_update_book_metadata_mutation(1, {"title": "Stale"}, expected_active_generation=1),
+            lambda: server.tool_copy_books_to_library_mutation([1], "main", expected_active_generation=1),
+        ):
+            with self.assertRaises(ValueError) as caught:
+                invoke()
+            self.assertIn("ACTIVE_LIBRARY_GENERATION_MISMATCH", str(caught.exception))
 
     def test_mutation_discovery_fails_closed_outside_exact_calibre_9_12_0(self):
         calibre = types.ModuleType("calibre")

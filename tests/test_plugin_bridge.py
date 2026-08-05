@@ -64,6 +64,9 @@ class FakeNewApi:
         self.fail_remove_books_once = False
         self.cover_data = {1: b"old cover", 2: b"source cover"}
 
+    def all_book_ids(self):
+        return frozenset(self.db.rows)
+
     def has_id(self, book_id):
         return book_id in self.db.rows
 
@@ -156,8 +159,11 @@ class FakeNewApi:
 
 class FakeDb:
     library_path = "/books"
+    library_id = "fake-library"
 
-    def __init__(self):
+    def __init__(self, library_path="/books", library_id="fake-library"):
+        self.library_path = library_path
+        self.library_id = library_id
         self.rows = {
             1: FakeMetadata("Example", ["Author"], {"isbn": "1"}),
             2: FakeMetadata("Example", ["Author"], {"isbn": "1"}),
@@ -353,10 +359,11 @@ class CalibreRpcBridgeTests(unittest.TestCase):
 
     def test_bridge_searches_current_library(self):
         bridge = CalibreRpcBridge(FakeGui())
-        rows = bridge.dispatch("search_books", {"query": "Example", "limit": 10})
-        self.assertEqual([row["id"] for row in rows], [1, 2])
-        self.assertEqual(rows[0]["library_path"], "/books")
-        self.assertEqual(rows[0]["formats"], ["EPUB", "PDF"])
+        result = bridge.dispatch("search_books", {"query": "Example", "limit": 10})
+        self.assertEqual([row["id"] for row in result["items"]], [1, 2])
+        self.assertEqual(result["library"], "current")
+        self.assertNotIn("library_path", result["items"][0])
+        self.assertEqual(result["items"][0]["formats"], ["EPUB", "PDF"])
 
     def test_content_server_url_is_exposed_only_when_running_and_authenticated(self):
         gui = FakeGui()
@@ -383,9 +390,72 @@ class CalibreRpcBridgeTests(unittest.TestCase):
 
     def test_bridge_finds_duplicates(self):
         bridge = CalibreRpcBridge(FakeGui())
-        duplicates = bridge.dispatch("find_duplicates", {"limit": 10})
-        self.assertEqual(len(duplicates), 1)
-        self.assertEqual(duplicates[0]["count"], 2)
+        result = bridge.dispatch("find_duplicates", {"limit": 10})
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["count"], 2)
+        self.assertIn("identifier:isbn", result["items"][0]["reasons"])
+
+    def test_duplicate_enumeration_uses_calibre_new_api(self):
+        db = FakeDb()
+        db.all_book_ids = None
+        result = CalibreRpcBridge(SimpleNamespace(current_db=db)).dispatch("find_duplicates", {"limit": 10})
+        self.assertEqual(result["scanned"], 3)
+
+    def test_library_registry_supports_redacted_inactive_reads_and_cross_library_matches(self):
+        with tempfile.TemporaryDirectory() as root:
+            incoming_path = Path(root) / "Incoming"
+            main_path = Path(root) / "Main"
+            for path in (incoming_path, main_path):
+                path.mkdir()
+                (path / "metadata.db").touch()
+            incoming = FakeDb(str(incoming_path), "incoming-id")
+            main = FakeDb(str(main_path), "main-id")
+            main.rows[1] = FakeMetadata("Different", ["Writer"], {"isbn": "1"})
+            main.rows[2] = FakeMetadata("Example", ["Author"], {})
+            broker = SimpleNamespace(get_library=lambda path: main if Path(path) == main_path else None)
+            gui = SimpleNamespace(current_db=incoming, library_broker=broker, job_manager=FakeJobManager())
+            registry = (
+                {"alias": "incoming", "label": "Incoming", "path": str(incoming_path), "read": True, "switch": True, "copy_destination": False, "library_id": "incoming-id"},
+                {"alias": "main", "label": "Main", "path": str(main_path), "read": True, "switch": True, "copy_destination": True, "library_id": "main-id"},
+            )
+            bridge = CalibreRpcBridge(gui, library_registry=registry)
+            listed = bridge.dispatch("list_libraries", {})
+            self.assertEqual(listed["active_library"], "incoming")
+            self.assertNotIn(str(main_path), json.dumps(listed))
+            searched = bridge.dispatch("search_books", {"library": "main", "query": "Example", "limit": 10})
+            self.assertEqual(searched["library"], "main")
+            self.assertEqual(searched["items"][0]["library"], "main")
+            self.assertIs(gui.current_db, incoming)
+            compared = bridge.dispatch("find_cross_library_duplicates", {"source_library": "incoming", "target_libraries": ["main"], "limit": 10})
+            self.assertTrue(compared["matches"])
+            reasons = {reason for match in compared["matches"] for candidate in match["candidates"] for reason in candidate["reasons"]}
+            self.assertIn("identifier:isbn", reasons)
+            self.assertIn("title_authors", reasons)
+
+    def test_switch_library_is_explicit_guarded_and_increments_generation(self):
+        with tempfile.TemporaryDirectory() as root:
+            incoming_path = Path(root) / "Incoming"
+            main_path = Path(root) / "Main"
+            for path in (incoming_path, main_path):
+                path.mkdir()
+                (path / "metadata.db").touch()
+            incoming = FakeDb(str(incoming_path), "incoming-id")
+            main = FakeDb(str(main_path), "main-id")
+            gui = SimpleNamespace(current_db=incoming, job_manager=FakeJobManager(), proceed_question=SimpleNamespace(questions=[]))
+            def switch(path, allow_rebuild=False):
+                self.assertFalse(allow_rebuild)
+                gui.current_db = main if Path(path) == main_path else incoming
+            gui.library_moved = switch
+            registry = (
+                {"alias": "incoming", "label": "Incoming", "path": str(incoming_path), "read": True, "switch": True},
+                {"alias": "main", "label": "Main", "path": str(main_path), "read": True, "switch": True},
+            )
+            bridge = CalibreRpcBridge(gui, library_registry=registry, library_switching_enabled=True)
+            switched = bridge.dispatch("switch_library", {"library": "main", "expected_active_library": "incoming", "expected_active_generation": 0, "confirmation": "SWITCH_LIBRARY:main"})
+            self.assertEqual(switched, {"active_library": "main", "active_generation": 1, "switched": True})
+            with self.assertRaises(BridgeMethodError) as caught:
+                bridge.dispatch("update_book_metadata", {"book_id": 1, "changes": {}, "expected_active_library": "incoming"})
+            self.assertEqual(caught.exception.code, "ACTIVE_LIBRARY_MISMATCH")
 
     def test_serialized_calls_are_handed_to_gui_dispatcher(self):
         gui_calls = queue.Queue()

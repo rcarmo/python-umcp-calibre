@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import io
@@ -35,6 +36,22 @@ def mutation_runtime_supported() -> bool:
     except ImportError:  # Source-tree tests use fakes rather than Calibre itself.
         return True
     return tuple(numeric_version[:3]) == SUPPORTED_CALIBRE_MUTATION_VERSION
+
+
+STABLE_READ_ERRORS = frozenset({
+    "ACTIVE_LIBRARY_GENERATION_MISMATCH",
+    "ACTIVE_LIBRARY_MISMATCH",
+    "BOOK_NOT_FOUND",
+    "CALIBRE_READ_FAILED",
+    "CURSOR_INVALID",
+    "LIBRARY_ALIAS_UNKNOWN",
+    "LIBRARY_IDENTITY_MISMATCH",
+    "LIBRARY_READ_DENIED",
+    "LIBRARY_SWITCH_BLOCKED",
+    "LIBRARY_SWITCH_DENIED",
+    "LIBRARY_SWITCH_REQUIRED",
+    "LIBRARY_UNAVAILABLE",
+})
 
 
 STABLE_MUTATION_ERRORS = frozenset({
@@ -75,6 +92,8 @@ class CalibreRpcBridge:
         import_roots: tuple[str, ...] = (),
         export_roots: tuple[str, ...] = (),
         destination_libraries: tuple[str, ...] = (),
+        library_registry: tuple[dict[str, object], ...] = (),
+        library_switching_enabled: bool = False,
         conversion_adapter=None,
         import_adapter=None,
         threaded_job_factory=None,
@@ -93,6 +112,9 @@ class CalibreRpcBridge:
         self.import_roots = tuple(Path(root).expanduser().resolve() for root in import_roots)
         self.export_roots = tuple(Path(root).expanduser().resolve() for root in export_roots)
         self.destination_libraries = tuple(Path(root).expanduser().resolve() for root in destination_libraries)
+        self.library_registry = tuple(dict(entry) for entry in library_registry)
+        self.library_switching_enabled = bool(library_switching_enabled)
+        self.active_generation = 0
         self._conversion_adapter = conversion_adapter
         self._import_adapter = import_adapter
         self._threaded_job_factory = threaded_job_factory
@@ -173,6 +195,12 @@ class CalibreRpcBridge:
             self.worker.join(timeout=2)
 
     def dispatch(self, method: str, params: dict[str, Any]) -> Any:
+        if method in {
+            "update_book_metadata", "add_book_format", "delete_book_format", "set_book_cover",
+            "add_book", "delete_books", "merge_duplicates", "convert_book", "copy_books_to_library",
+            "move_books_to_library", "save_book_to_disk", "email_book",
+        }:
+            self._require_active_guards(params)
         if method == "ping":
             return {"ok": True, "version": BRIDGE_VERSION, "library_path": self._library_path()}
         if method == "list_libraries":
@@ -180,9 +208,14 @@ class CalibreRpcBridge:
         if method == "search_books":
             return self._search_books(params)
         if method == "get_book_metadata":
-            return self._metadata(self._db(), int(params["book_id"]))
+            db, alias = self._resolve_library(params.get("library"))
+            return self._metadata(db, int(params["book_id"]), alias)
         if method == "find_duplicates":
-            return self._find_duplicates(int(params.get("limit") or 1000))
+            return self._find_duplicates(params)
+        if method == "find_cross_library_duplicates":
+            return self._find_cross_library_duplicates(params)
+        if method == "switch_library":
+            return self._switch_library(params)
         if method == "content_server_status":
             return self._content_server_status()
         if method == "list_jobs":
@@ -229,22 +262,121 @@ class CalibreRpcBridge:
             library_path = library_path()
         return str(library_path or "")
 
-    def _list_libraries(self) -> dict[str, str]:
-        return {"current": self._library_path()}
+    def _entry_for_path(self, path: str) -> dict[str, object] | None:
+        try:
+            resolved = Path(path).expanduser().resolve()
+        except Exception:
+            return None
+        return next((entry for entry in self.library_registry if Path(str(entry["path"])).resolve() == resolved), None)
 
-    def _search_books(self, params: dict[str, Any]) -> list[dict[str, Any]]:
-        db = self._db()
-        query = params.get("query") or ""
-        limit = max(0, min(int(params.get("limit") or 50), 500))
-        if query:
-            # Calibre DB API returns ids for standard Calibre search syntax.
-            ids = list(db.search_getting_ids(query, None))
+    def _active_alias(self) -> str:
+        entry = self._entry_for_path(self._library_path())
+        return str(entry["alias"]) if entry else "current"
+
+    def _resolve_library(self, selector: Any = None):
+        alias = str(selector or "current")
+        if alias == "current" or alias == self._active_alias():
+            db = self._db()
+            canonical = self._active_alias()
         else:
-            ids = list(db.all_book_ids())
-        return [self._metadata(db, book_id) for book_id in ids[:limit]]
+            entry = next((item for item in self.library_registry if item.get("alias") == alias), None)
+            if entry is None:
+                raise BridgeMethodError("LIBRARY_ALIAS_UNKNOWN", "The requested library alias is not configured")
+            if not entry.get("read", True):
+                raise BridgeMethodError("LIBRARY_READ_DENIED", "Read access is disabled for the requested library")
+            path = Path(str(entry["path"]))
+            if not (path / "metadata.db").is_file():
+                raise BridgeMethodError("LIBRARY_UNAVAILABLE", "The requested library is unavailable")
+            broker = getattr(self.gui, "library_broker", None)
+            getter = getattr(broker, "get_library", None)
+            if not callable(getter):
+                raise BridgeMethodError("LIBRARY_UNAVAILABLE", "Calibre's library broker is unavailable")
+            try:
+                db = getter(str(path))
+            except Exception as exc:
+                raise BridgeMethodError("CALIBRE_READ_FAILED", "Calibre could not open the requested library") from exc
+            if db is None:
+                raise BridgeMethodError("LIBRARY_UNAVAILABLE", "The requested library is unavailable")
+            canonical = alias
+        entry = next((item for item in self.library_registry if item.get("alias") == canonical), None)
+        expected_id = str(entry.get("library_id") or "") if entry else ""
+        observed_id = str(getattr(db, "library_id", "") or getattr(getattr(db, "new_api", None), "library_id", "") or "")
+        if expected_id and observed_id and expected_id != observed_id:
+            raise BridgeMethodError("LIBRARY_IDENTITY_MISMATCH", "The configured library identity has changed")
+        return db, canonical
 
-    def _metadata(self, db, book_id: int) -> dict[str, Any]:
-        mi = db.get_metadata(book_id, index_is_id=True)
+    def _list_libraries(self) -> dict[str, Any]:
+        active = self._active_alias()
+        libraries = []
+        seen = set()
+        for entry in self.library_registry:
+            alias = str(entry["alias"])
+            seen.add(alias)
+            path = Path(str(entry["path"]))
+            libraries.append({
+                "alias": alias,
+                "label": str(entry.get("label") or alias),
+                "active": alias == active,
+                "available": (path / "metadata.db").is_file() or alias == active,
+                "readable": bool(entry.get("read", True)),
+                "switchable": bool(entry.get("switch", False) and self.library_switching_enabled),
+                "copy_destination": bool(entry.get("copy_destination", False)),
+            })
+        if active == "current" and active not in seen:
+            libraries.insert(0, {"alias": "current", "label": "Current library", "active": True, "available": True, "readable": True, "switchable": False, "copy_destination": False})
+        return {"active_library": active, "active_generation": self.active_generation, "libraries": libraries}
+
+    @staticmethod
+    def _cursor_fingerprint(label: str, arguments: dict[str, Any]) -> str:
+        return hashlib.sha256(json.dumps([label, arguments], sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:24]
+
+    def _cursor_offset(self, cursor: Any, label: str, arguments: dict[str, Any]) -> int:
+        if not cursor:
+            return 0
+        try:
+            payload = json.loads(base64.urlsafe_b64decode(str(cursor) + "=" * (-len(str(cursor)) % 4)))
+            if payload != {"v": 1, "o": int(payload["o"]), "f": self._cursor_fingerprint(label, arguments)} or payload["o"] < 0:
+                raise ValueError
+            return int(payload["o"])
+        except Exception as exc:
+            raise BridgeMethodError("CURSOR_INVALID", "The cursor does not match this request") from exc
+
+    def _next_cursor(self, offset: int, label: str, arguments: dict[str, Any]) -> str:
+        payload = {"v": 1, "o": offset, "f": self._cursor_fingerprint(label, arguments)}
+        return base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
+
+    def _search_books(self, params: dict[str, Any]) -> dict[str, Any]:
+        db, alias = self._resolve_library(params.get("library"))
+        query = str(params.get("query") or "")
+        limit = max(1, min(int(params.get("limit") or 20), 500))
+        arguments = {"library": alias, "query": query, "limit": limit}
+        offset = self._cursor_offset(params.get("cursor"), "search", arguments)
+        try:
+            if query:
+                ids = list(db.search_getting_ids(query, None))
+            else:
+                api = getattr(db, "new_api", None)
+                ids = list(api.all_book_ids()) if callable(getattr(api, "all_book_ids", None)) else list(db.all_book_ids())
+        except BridgeMethodError:
+            raise
+        except Exception as exc:
+            raise BridgeMethodError("CALIBRE_READ_FAILED", "Calibre search failed") from exc
+        ids = sorted(int(book_id) for book_id in ids)
+        page = ids[offset: offset + limit]
+        truncated = offset + limit < len(ids)
+        return {
+            "library": alias,
+            "items": [self._metadata(db, book_id, alias) for book_id in page],
+            "limit": limit,
+            "truncated": truncated,
+            "next_cursor": self._next_cursor(offset + limit, "search", arguments) if truncated else None,
+        }
+
+    def _metadata(self, db, book_id: int, library: str | None = None) -> dict[str, Any]:
+        try:
+            mi = db.get_metadata(book_id, index_is_id=True)
+        except Exception as exc:
+            raise BridgeMethodError("BOOK_NOT_FOUND", "The requested book does not exist in the selected library") from exc
         formats_value = db.formats(book_id, index_is_id=True) or []
         formats = [f.strip() for f in formats_value.split(",") if f.strip()] if isinstance(formats_value, str) else list(formats_value)
         return {
@@ -257,7 +389,7 @@ class CalibreRpcBridge:
             "tags": list(mi.tags or []),
             "identifiers": dict(mi.identifiers or {}),
             "formats": formats,
-            "library_path": self._library_path(),
+            "library": library or self._active_alias(),
         }
 
     def _content_server_status(self) -> dict[str, Any]:
@@ -301,18 +433,171 @@ class CalibreRpcBridge:
             "reason": reason,
         }
 
-    def _find_duplicates(self, limit: int) -> list[dict[str, Any]]:
-        db = self._db()
-        buckets: dict[str, list[dict[str, Any]]] = {}
-        for book_id in list(db.all_book_ids())[: max(0, min(limit, 5000))]:
-            item = self._metadata(db, book_id)
-            key = (
-                (item.get("title") or "").casefold().strip(),
-                tuple(a.casefold().strip() for a in item.get("authors") or []),
-                json.dumps(item.get("identifiers") or {}, sort_keys=True),
-            )
-            buckets.setdefault(repr(key), []).append(item)
-        return [{"count": len(v), "books": v} for v in buckets.values() if len(v) > 1]
+    @staticmethod
+    def _normalised_match_fields(item: dict[str, Any]) -> tuple[dict[str, str], tuple[str, tuple[str, ...]]]:
+        identifiers = {
+            str(kind).casefold().strip(): re.sub(r"[\s-]+", "", str(value)).casefold()
+            for kind, value in (item.get("identifiers") or {}).items()
+            if str(kind).strip() and str(value).strip()
+        }
+        title_authors = (
+            re.sub(r"\s+", " ", str(item.get("title") or "").casefold()).strip(),
+            tuple(sorted(re.sub(r"\s+", " ", str(author).casefold()).strip() for author in item.get("authors") or [])),
+        )
+        return identifiers, title_authors
+
+    def _all_book_ids(self, db) -> list[int]:
+        api = getattr(db, "new_api", None)
+        method = getattr(api, "all_book_ids", None)
+        if not callable(method):
+            raise BridgeMethodError("CALIBRE_READ_FAILED", "Calibre does not expose the tested book enumeration API")
+        try:
+            return sorted(int(book_id) for book_id in method())
+        except Exception as exc:
+            raise BridgeMethodError("CALIBRE_READ_FAILED", "Calibre could not enumerate books") from exc
+
+    def _find_duplicates(self, params: dict[str, Any]) -> dict[str, Any]:
+        db, alias = self._resolve_library(params.get("library"))
+        limit = max(1, min(int(params.get("limit") or 1000), 5000))
+        arguments = {"library": alias, "limit": limit}
+        offset = self._cursor_offset(params.get("cursor"), "duplicates", arguments)
+        ids = self._all_book_ids(db)
+        selected = ids[offset: offset + limit]
+        identifier_buckets: dict[tuple[str, str], set[int]] = {}
+        title_buckets: dict[tuple[str, tuple[str, ...]], set[int]] = {}
+        items: dict[int, dict[str, Any]] = {}
+        for book_id in selected:
+            item = self._metadata(db, book_id, alias)
+            items[book_id] = item
+            identifiers, title_authors = self._normalised_match_fields(item)
+            for pair in identifiers.items():
+                identifier_buckets.setdefault(pair, set()).add(book_id)
+            if title_authors[0] and title_authors[1]:
+                title_buckets.setdefault(title_authors, set()).add(book_id)
+        groups: dict[tuple[int, ...], set[str]] = {}
+        for (kind, _value), book_ids in identifier_buckets.items():
+            if len(book_ids) > 1:
+                groups.setdefault(tuple(sorted(book_ids)), set()).add(f"identifier:{kind}")
+        for book_ids in title_buckets.values():
+            if len(book_ids) > 1:
+                groups.setdefault(tuple(sorted(book_ids)), set()).add("title_authors")
+        result = [
+            {"count": len(book_ids), "books": [items[book_id] for book_id in book_ids], "reasons": sorted(reasons)}
+            for book_ids, reasons in sorted(groups.items())
+        ]
+        truncated = offset + limit < len(ids)
+        return {
+            "library": alias,
+            "items": result,
+            "limit": limit,
+            "scanned": len(selected),
+            "truncated": truncated,
+            "next_cursor": self._next_cursor(offset + limit, "duplicates", arguments) if truncated else None,
+        }
+
+    def _find_cross_library_duplicates(self, params: dict[str, Any]) -> dict[str, Any]:
+        source_db, source_alias = self._resolve_library(params.get("source_library"))
+        targets = params.get("target_libraries")
+        if not isinstance(targets, list) or not targets or len(targets) > 16:
+            raise BridgeMethodError("LIBRARY_ALIAS_UNKNOWN", "One to sixteen target library aliases are required")
+        target_pairs = [self._resolve_library(alias) for alias in targets]
+        if source_alias in {alias for _db, alias in target_pairs}:
+            raise BridgeMethodError("LIBRARY_ALIAS_UNKNOWN", "Source and target libraries must differ")
+        limit = max(1, min(int(params.get("limit") or 100), 500))
+        per_book = max(1, min(int(params.get("candidate_limit_per_book") or 20), 100))
+        query = str(params.get("source_query") or "")
+        source_ids = sorted(source_db.search_getting_ids(query, None)) if query else self._all_book_ids(source_db)
+        source_ids = [int(book_id) for book_id in source_ids[:limit]]
+        indexes = []
+        for target_db, target_alias in target_pairs:
+            target_items = [self._metadata(target_db, book_id, target_alias) for book_id in self._all_book_ids(target_db)]
+            indexes.append((target_alias, target_items))
+        matches = []
+        total_candidates = 0
+        for source_id in source_ids:
+            source = self._metadata(source_db, source_id, source_alias)
+            source_identifiers, source_title = self._normalised_match_fields(source)
+            candidates = []
+            for target_alias, target_items in indexes:
+                for candidate in target_items:
+                    candidate_identifiers, candidate_title = self._normalised_match_fields(candidate)
+                    shared = sorted(
+                        kind for kind, value in source_identifiers.items()
+                        if candidate_identifiers.get(kind) == value
+                    )
+                    reasons = [f"identifier:{kind}" for kind in shared]
+                    if source_title[0] and source_title == candidate_title:
+                        reasons.append("title_authors")
+                    if not reasons:
+                        continue
+                    conflicts = any(
+                        kind in candidate_identifiers and candidate_identifiers[kind] != value
+                        for kind, value in source_identifiers.items()
+                    )
+                    confidence = "high" if shared and not conflicts else "medium"
+                    candidates.append({**candidate, "reasons": reasons, "confidence": confidence})
+                    total_candidates += 1
+                    if len(candidates) >= per_book or total_candidates >= 2000:
+                        break
+                if len(candidates) >= per_book or total_candidates >= 2000:
+                    break
+            if candidates:
+                matches.append({"source": source, "candidates": candidates})
+            if total_candidates >= 2000:
+                break
+        return {
+            "source_library": source_alias,
+            "target_libraries": [alias for _db, alias in target_pairs],
+            "scanned_source_count": len(source_ids),
+            "matches": matches,
+            "truncated": len(source_ids) < len(self._all_book_ids(source_db)) or total_candidates >= 2000,
+        }
+
+    def _switch_library(self, params: dict[str, Any]) -> dict[str, Any]:
+        if not self.library_switching_enabled:
+            raise BridgeMethodError("LIBRARY_SWITCH_DENIED", "Library switching is disabled by plugin policy")
+        target = str(params.get("library") or "")
+        entry = next((item for item in self.library_registry if item.get("alias") == target), None)
+        if entry is None:
+            raise BridgeMethodError("LIBRARY_ALIAS_UNKNOWN", "The requested library alias is not configured")
+        if not entry.get("switch", False):
+            raise BridgeMethodError("LIBRARY_SWITCH_DENIED", "Switching to the requested library is disabled")
+        self._require_active_guards({key: value for key, value in params.items() if key != "library"})
+        expected_confirmation = f"SWITCH_LIBRARY:{target}"
+        if params.get("confirmation") != expected_confirmation:
+            raise BridgeMethodError("POLICY_DENIED", f"confirmation must be exactly {expected_confirmation}")
+        if os.environ.get("CALIBRE_OVERRIDE_DATABASE_PATH"):
+            raise BridgeMethodError("LIBRARY_SWITCH_BLOCKED", "Calibre's database override prevents switching")
+        manager = getattr(self.gui, "job_manager", None)
+        has_jobs = getattr(manager, "has_jobs", None)
+        if (callable(has_jobs) and has_jobs()) or any(record.get("status") in {"queued", "running"} for record in self.job_records.values()):
+            raise BridgeMethodError("LIBRARY_SWITCH_BLOCKED", "Library switching is blocked while jobs are active")
+        questions = getattr(getattr(self.gui, "proceed_question", None), "questions", None)
+        if questions:
+            raise BridgeMethodError("LIBRARY_SWITCH_BLOCKED", "Library switching is blocked by pending Calibre questions")
+        switch = getattr(self.gui, "library_moved", None)
+        if not callable(switch):
+            raise BridgeMethodError("LIBRARY_SWITCH_DENIED", "Calibre's tested GUI switch API is unavailable")
+        try:
+            switch(str(entry["path"]), allow_rebuild=False)
+        except Exception as exc:
+            raise BridgeMethodError("LIBRARY_SWITCH_BLOCKED", "Calibre could not switch to the requested library") from exc
+        observed = self._entry_for_path(self._library_path())
+        if observed is None or observed.get("alias") != target:
+            raise BridgeMethodError("LIBRARY_IDENTITY_MISMATCH", "Calibre did not activate the requested library")
+        self.active_generation += 1
+        return {"active_library": target, "active_generation": self.active_generation, "switched": True}
+
+    def _require_active_guards(self, params: dict[str, Any]) -> None:
+        expected_alias = params.get("expected_active_library")
+        expected_generation = params.get("expected_active_generation")
+        if expected_alias is not None and str(expected_alias) not in {"current", self._active_alias()}:
+            raise BridgeMethodError("ACTIVE_LIBRARY_MISMATCH", "The active library changed after the request was prepared")
+        if expected_generation is not None and int(expected_generation) != self.active_generation:
+            raise BridgeMethodError("ACTIVE_LIBRARY_GENERATION_MISMATCH", "The active library generation is stale")
+        requested = params.get("library")
+        if requested is not None and str(requested) not in {"current", self._active_alias()}:
+            raise BridgeMethodError("LIBRARY_SWITCH_REQUIRED", "The requested mutation target is not the active library")
 
     def _new_api(self):
         try:
@@ -945,13 +1230,21 @@ class CalibreRpcBridge:
     def _allowed_destination_library(self, value: Any) -> Path:
         if not value:
             raise BridgeMethodError("DESTINATION_UNAVAILABLE", "A configured destination library is required")
-        candidate = Path(str(value)).expanduser().resolve()
-        if candidate not in self.destination_libraries:
-            raise BridgeMethodError("POLICY_DENIED", "Destination is not in the UI-configured library allowlist")
+        selector = str(value)
+        entry = next((item for item in self.library_registry if item.get("alias") == selector), None)
+        if entry is not None:
+            if not entry.get("copy_destination", False):
+                raise BridgeMethodError("POLICY_DENIED", "Destination alias is not enabled for copy or move")
+            candidate = Path(str(entry["path"])).expanduser().resolve()
+        else:
+            # One-release compatibility for deployments that still store destination paths.
+            candidate = Path(selector).expanduser().resolve()
+            if candidate not in self.destination_libraries:
+                raise BridgeMethodError("POLICY_DENIED", "Destination is not in the UI-configured library registry")
         if candidate == Path(self._library_path()).expanduser().resolve():
             raise BridgeMethodError("POLICY_DENIED", "Source and destination libraries must differ")
         if not (candidate / "metadata.db").is_file():
-            raise BridgeMethodError("DESTINATION_UNAVAILABLE", "Destination library metadata.db is unavailable")
+            raise BridgeMethodError("DESTINATION_UNAVAILABLE", "Destination library is unavailable")
         return candidate
 
     @staticmethod

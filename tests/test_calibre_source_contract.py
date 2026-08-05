@@ -109,6 +109,34 @@ class CalibreSourceContractTests(unittest.TestCase):
         )
         self.assertEqual(worker_methods["do_one"][:4], ["self", "num", "book_id", "newdb"])
 
+    def test_library_broker_and_switch_contracts_match_calibre_9_12_mapping(self):
+        broker_methods = self.class_methods("calibre/srv/library_broker.py", "GuiLibraryBroker")
+        lifecycle_methods = self.class_methods("calibre/srv/library_broker.py", "LibraryBroker")
+        self.assertEqual(lifecycle_methods["__enter__"][:1], ["self"])
+        self.assertEqual(lifecycle_methods["__exit__"][:1], ["self"])
+        expected = {
+            "get_library": ["self", "original_library_path"],
+            "prepare_for_gui_library_change": ["self", "newloc"],
+            "gui_library_changed": ["self", "db", "olddb"],
+            "is_gui_library": ["self", "library_path"],
+            "prune_loaded_dbs": ["self"],
+            "unload_library": ["self", "library_path"],
+        }
+        for name, prefix in expected.items():
+            self.assertIn(name, broker_methods)
+            self.assertEqual(broker_methods[name][: len(prefix)], prefix)
+
+        main_methods = self.class_methods("calibre/gui2/ui.py", "Main")
+        self.assertEqual(main_methods["library_moved"][:4], ["self", "newloc", "copy_structure", "allow_rebuild"])
+
+        choose_methods = self.class_methods("calibre/gui2/actions/choose_library.py", "ChooseLibraryAction")
+        self.assertEqual(choose_methods["change_library_allowed"][:1], ["self"])
+        self.assertEqual(choose_methods["switch_requested"][:2], ["self", "location"])
+        self.assertEqual(
+            choose_methods["choose_library_callback"][:4],
+            ["self", "newloc", "copy_structure", "library_renamed"],
+        )
+
     def test_save_to_disk_contracts_match_calibre_9_12_mapping(self):
         legacy_methods = self.class_methods("calibre/db/legacy.py", "LibraryDatabase")
         self.assertEqual(

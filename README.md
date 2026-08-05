@@ -6,12 +6,14 @@ For the released plugin path, the MCP client talks straight to the Calibre GUI p
 
 ## What It Exposes
 
-Read-only discovery is small on purpose. Agents should start with `capabilities_readonly()`, then `search_books_readonly(query="", limit=20)`, then `get_book_metadata_readonly(book_id)`. The rest of the read-only surface is:
+Read-only discovery is small on purpose. Agents should start with `capabilities_readonly()`, then `list_libraries_readonly()`, then `search_books_readonly(query="", library="current", limit=20)`. Read results use bounded object envelopes with canonical aliases, stable ordering, truncation metadata and opaque cursors. The rest of the read-only surface is:
 
 * `describe_tool_readonly(tool_name)` expands one implemented tool at a time instead of dumping every schema into context.
-* `bridge_status_readonly()` reports the bridge version and active library path.
-* `list_libraries_readonly()` returns the active Calibre library for the in-process plugin surface.
-* `find_duplicates_readonly(limit=1000)` groups probable duplicates by title, authors and identifiers.
+* `bridge_status_readonly()` reports the bridge version, active alias and active generation without exposing library paths.
+* `list_libraries_readonly()` returns only UI-configured aliases, labels, availability and policy flags.
+* `get_book_metadata_readonly(book_id, library="current")` returns a scoped `{library, book_id}` reference.
+* `find_duplicates_readonly(library="current", limit=1000)` groups probable duplicates through Calibre's 9.12 `new_api.all_book_ids()` enumeration.
+* `find_cross_library_duplicates_readonly(source_library, target_libraries, limit=100)` compares configured libraries by normalized identifiers and title/authors without switching the visible GUI library.
 * `content_server_status_readonly()` reports only an existing authenticated content-server base URL, and only when the bind is concrete enough to be honest about.
 * `list_bridge_jobs_readonly()` and `get_bridge_job_status_readonly(job_id)` expose the bridge's own job and audit records.
 
@@ -37,10 +39,15 @@ Once that gate opens, `capabilities_mutation()` advertises the current mutators:
 * `save_book_to_disk_mutation(book_id, destination_directory, options={}, overwrite=False)` exports through Calibre's save-to-disk engine into a configured export root. Supported `options` keys are `template`, `formats`, `save_cover`, `write_opf`, `save_extra_files`, `update_metadata`, `asciiize`, `to_lowercase`, `replace_whitespace`, and `single_dir`.
 * `email_book_mutation(book_id, recipient, format, auto_convert=False)` submits one existing format to one already-configured Calibre recipient. `auto_convert` is accepted as a parameter only so the tool can reject it cleanly; queue a conversion separately if the requested format is missing.
 * `cancel_bridge_job_mutation(job_id)` asks Calibre to cancel a queued or running native job and reports the result at the next safe boundary.
+* `switch_library_mutation(library, expected_active_library, expected_active_generation, confirmation)` is separately enabled and requires the exact confirmation `SWITCH_LIBRARY:<alias>`; it uses Calibre's GUI switch path with repair disabled.
+
+Every mutation that depends on the active library also accepts optional `expected_active_library` and `expected_active_generation` guards. A stale request fails before changing Calibre.
 
 ## Boundaries That Matter
 
-* Import, format-replacement and cover paths must live under UI-configured import roots. Exports must stay under UI-configured export roots. Cross-library copy and move destinations must match the UI allowlist exactly, and e-mail can only use Calibre-configured recipients plus the formats enabled for those recipients.
+* Import, format-replacement and cover paths must live under UI-configured import roots. Exports must stay under UI-configured export roots. Cross-library copy and move destinations use registry aliases marked as copy destinations; raw allowlisted paths remain an internal one-release compatibility path. E-mail can only use Calibre-configured recipients plus the formats enabled for those recipients.
+* Inactive reads use Calibre's `GuiLibraryBroker` secondary handles. The bridge never opens `metadata.db` directly and never switches the visible library as a side effect of a read.
+* Library aliases match `^[a-z][a-z0-9_-]{0,63}$`. Registry paths and Calibre library identities remain private, and an identity mismatch fails closed until the operator reviews the configuration.
 * `content_server_status_readonly()` reports only a concrete authenticated base URL. If the content server is stopped, auth is disabled, or it listens on a wildcard address such as `0.0.0.0`, the tool withholds the URL rather than inventing one. Temporary public links are not implemented.
 * Short metadata, format, cover, merge and trash mutations are dispatched onto the GUI thread and are not interruptible once the database call starts. Longer operations use Calibre's own job machinery, and bridge job records tell the truth about partial work and delayed cancellation instead of pretending a killed job changed nothing.
 * Permanent deletion, arbitrary recipients, automatic e-mail conversion, public temporary links, device operations, and the obsolete singular `copy_book` and `move_book` methods are not supported. The compatibility server under `src/calibre_umcp/server.py` also keeps legacy mutator names such as `convert_book`, `copy_book`, `move_book_destructive`, and `email_book` as explicit failures.

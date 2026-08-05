@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 from dataclasses import dataclass
 
 from calibre.utils.config import JSONConfig
@@ -19,6 +21,8 @@ class BridgeSettings:
     import_roots: tuple[str, ...]
     export_roots: tuple[str, ...]
     destination_libraries: tuple[str, ...]
+    library_registry: tuple[dict[str, object], ...]
+    library_switching_enabled: bool
     audit_path: str | None
     audit_retention: int
 
@@ -33,6 +37,8 @@ def config() -> JSONConfig:
         "import_roots": "",
         "export_roots": "",
         "destination_libraries": "",
+        "library_registry": "[]",
+        "library_switching_enabled": False,
         "audit_path": "",
         "audit_retention": 500,
     })
@@ -41,6 +47,45 @@ def config() -> JSONConfig:
 
 def _paths(value: str) -> tuple[str, ...]:
     return tuple(line.strip() for line in (value or "").splitlines() if line.strip())
+
+
+_ALIAS_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+
+
+def _library_registry(value: str) -> tuple[dict[str, object], ...]:
+    try:
+        raw = json.loads(value or "[]")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Library registry must be a JSON array") from exc
+    if not isinstance(raw, list):
+        raise ValueError("Library registry must be a JSON array")
+    entries: list[dict[str, object]] = []
+    aliases: set[str] = set()
+    paths: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("Each library registry entry must be an object")
+        alias = str(item.get("alias") or "")
+        path = str(item.get("path") or "").strip()
+        if not _ALIAS_RE.fullmatch(alias):
+            raise ValueError(f"Invalid library alias: {alias!r}")
+        normalized_path = os.path.realpath(os.path.expanduser(path)) if path else ""
+        if not normalized_path:
+            raise ValueError(f"Library {alias!r} requires a path")
+        if alias in aliases or normalized_path in paths:
+            raise ValueError("Library aliases and paths must be unique")
+        aliases.add(alias)
+        paths.add(normalized_path)
+        entries.append({
+            "alias": alias,
+            "label": str(item.get("label") or alias),
+            "path": normalized_path,
+            "read": bool(item.get("read", True)),
+            "switch": bool(item.get("switch", False)),
+            "copy_destination": bool(item.get("copy_destination", False)),
+            "library_id": str(item.get("library_id") or "") or None,
+        })
+    return tuple(entries)
 
 
 def load_settings(environ=None) -> BridgeSettings:
@@ -65,6 +110,8 @@ def load_settings(environ=None) -> BridgeSettings:
         import_roots=_paths(str(prefs["import_roots"] or "")),
         export_roots=_paths(str(prefs["export_roots"] or "")),
         destination_libraries=_paths(str(prefs["destination_libraries"] or "")),
+        library_registry=_library_registry(str(prefs["library_registry"] or "[]")),
+        library_switching_enabled=bool(prefs["library_switching_enabled"]),
         audit_path=audit_path,
         audit_retention=max(10, min(int(prefs["audit_retention"] or 500), 10000)),
     )
