@@ -12,6 +12,12 @@ class PluginMetadataTests(unittest.TestCase):
             "calibre_plugins.calibre_umcp_plugin.ui:CalibreUmcpAction",
         )
 
+    def test_plugin_zip_declares_its_calibre_import_name(self):
+        marker = Path(
+            "plugins/calibre_umcp_plugin/plugin-import-name-calibre_umcp_plugin.txt"
+        )
+        self.assertTrue(marker.is_file())
+
     def test_bridge_version_matches_plugin_metadata(self):
         self.assertEqual(BRIDGE_VERSION, PLUGIN_VERSION_STRING)
         self.assertEqual(BRIDGE_VERSION, ".".join(str(part) for part in CalibreUmcpPlugin.version))

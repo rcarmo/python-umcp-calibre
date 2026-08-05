@@ -173,14 +173,21 @@ class MCPServer:
             if not self.logger.handlers:
                 self.logger.addHandler(NullHandler())
             return
-        self.log_file.parent.mkdir(exist_ok=True)
+        try:
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
+            handler = FileHandler(self.log_file)
+        except (FileExistsError, NotADirectoryError):
+            # Calibre imports plugins from inside their ZIP. Logging must not
+            # prevent the embedded server from starting when that package path
+            # is a file rather than a directory.
+            if not self.logger.handlers:
+                self.logger.addHandler(NullHandler())
+            return
         basicConfig(
             level=INFO,
             format='[%(asctime)s] [%(levelname)s] %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S',
-            handlers=[
-                FileHandler(self.log_file),
-            ]
+            handlers=[handler]
         )
 
     def get_config(self) -> dict[str, Any]:

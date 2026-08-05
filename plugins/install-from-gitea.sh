@@ -22,6 +22,7 @@ for file in umcp.py umcp_shared.py; do
     "$SOURCE_BASE/src/calibre_umcp/$file" \
     -o "$WORK/$file"
 done
+touch "$WORK/plugin-import-name-calibre_umcp_plugin.txt"
 
 python3 - <<'PY'
 import os
@@ -30,7 +31,16 @@ from zipfile import ZIP_DEFLATED, ZipFile
 work = Path(os.environ.get('WORK', '/tmp/calibre-umcp-plugin-src'))
 out = Path(os.environ.get('OUT', '/tmp/calibre-umcp-plugin.zip'))
 with ZipFile(out, 'w', ZIP_DEFLATED) as zf:
-    for name in ('__init__.py', 'bridge.py', 'config.py', 'mcp.py', 'ui.py', 'umcp.py', 'umcp_shared.py'):
+    for name in (
+        '__init__.py',
+        'bridge.py',
+        'config.py',
+        'mcp.py',
+        'ui.py',
+        'umcp.py',
+        'umcp_shared.py',
+        'plugin-import-name-calibre_umcp_plugin.txt',
+    ):
         zf.write(work / name, name)
 print(f'{out} {out.stat().st_size}')
 PY
