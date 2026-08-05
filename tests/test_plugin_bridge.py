@@ -206,13 +206,18 @@ class FakeModel:
     def __init__(self):
         self.refreshed = []
         self.deleted = []
+        self.delete_refreshes = 0
         self.added = []
 
     def refresh_ids(self, ids, current_row=-1):
         self.refreshed.append((tuple(ids), current_row))
 
-    def books_deleted(self, ids):
+    def ids_deleted(self, ids):
         self.deleted.append(tuple(ids))
+        self.books_deleted()
+
+    def books_deleted(self):
+        self.delete_refreshes += 1
 
     def books_added(self, count):
         self.added.append(count)
@@ -1141,6 +1146,30 @@ class CalibreRpcBridgeTests(unittest.TestCase):
         self.assertEqual(deleted["result"]["trashed"], [3])
         self.assertNotIn(3, gui.current_db.rows)
         self.assertEqual(gui.library_view.model().deleted, [(3,)])
+        self.assertEqual(gui.library_view.model().delete_refreshes, 1)
+        self.assertEqual(deleted["result"]["warnings"], [])
+
+    def test_delete_reports_success_after_verified_removal_when_model_notification_fails(self):
+        gui = FakeGui()
+        bridge = CalibreRpcBridge(gui)
+        preview = bridge.dispatch("delete_books", {"book_ids": [3], "dry_run": True})
+
+        def fail_notification():
+            raise RuntimeError("model refresh failed")
+
+        gui.library_view.model().books_deleted = fail_notification
+        deleted = bridge.dispatch(
+            "delete_books",
+            {
+                "book_ids": [3],
+                "dry_run": False,
+                "confirmation": preview["result"]["confirmation"],
+            },
+        )
+        self.assertEqual(deleted["status"], "completed")
+        self.assertEqual(deleted["result"]["trashed"], [3])
+        self.assertEqual(deleted["result"]["warnings"], ["gui_model_notification_failed"])
+        self.assertNotIn(3, gui.current_db.rows)
 
     def test_email_uses_only_configured_recipient_and_native_threaded_job(self):
         gui = FakeGui()
@@ -1491,6 +1520,9 @@ class CalibreRpcBridgeTests(unittest.TestCase):
             completed = bridge.dispatch("get_job_status", {"job_id": queued["id"]})
             self.assertEqual(completed["status"], "completed")
             self.assertEqual(completed["result"]["moved_to_trash"], [3])
+            self.assertEqual(completed["result"]["warnings"], [])
+            self.assertEqual(gui.library_view.model().deleted, [(3,)])
+            self.assertEqual(gui.library_view.model().delete_refreshes, 1)
             self.assertNotIn(3, gui.current_db.rows)
 
     def test_partial_copy_failure_never_deletes_move_sources(self):

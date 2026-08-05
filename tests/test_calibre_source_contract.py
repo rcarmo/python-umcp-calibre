@@ -68,6 +68,11 @@ class CalibreSourceContractTests(unittest.TestCase):
             self.assertIn(name, methods)
             self.assertEqual(methods[name][: len(prefix)], prefix)
 
+    def test_library_model_delete_notification_contract_matches_calibre_9_12(self):
+        methods = self.class_methods("calibre/gui2/library/models.py", "BooksModel")
+        self.assertEqual(methods["ids_deleted"][:2], ["self", "ids"])
+        self.assertEqual(methods["books_deleted"][:1], ["self"])
+
     def test_legacy_format_path_contract_matches_calibre_9_12_mapping(self):
         methods = self.class_methods("calibre/db/legacy.py", "LibraryDatabase")
         self.assertEqual(methods["format_abspath"][:4], ["self", "index", "fmt", "index_is_id"])

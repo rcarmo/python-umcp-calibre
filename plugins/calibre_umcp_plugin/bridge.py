@@ -1632,11 +1632,15 @@ class CalibreRpcBridge:
             remaining = [book_id for book_id in book_ids if api.has_id(book_id)]
             if remaining:
                 raise BridgeMethodError("CALIBRE_JOB_FAILED", f"Calibre retained book ids: {remaining}")
+            warnings = []
             model = getattr(getattr(self.gui, "library_view", None), "model", lambda: None)()
-            notify = getattr(model, "books_deleted", None)
+            notify = getattr(model, "ids_deleted", None)
             if callable(notify):
-                notify(book_ids)
-            return {"dry_run": False, "trashed": list(book_ids), "permanent": False}
+                try:
+                    notify(book_ids)
+                except Exception:
+                    warnings.append("gui_model_notification_failed")
+            return {"dry_run": False, "trashed": list(book_ids), "permanent": False, "warnings": warnings}
 
         return self._run_short_mutation("delete_books", params, operation)
 
@@ -2101,6 +2105,7 @@ class CalibreRpcBridge:
                 )
                 return
             moved_ids: list[int] = []
+            warnings: list[str] = []
             if context["move"]:
                 if Path(self._library_path()).expanduser().resolve() != context["source_path"]:
                     raise BridgeMethodError("PARTIAL_COPY", "Active source library changed before move deletion")
@@ -2120,11 +2125,14 @@ class CalibreRpcBridge:
                     raise BridgeMethodError("PARTIAL_COPY", f"Destination verified but source trash operation was incomplete: {remaining}")
                 moved_ids = list(context["book_ids"])
                 model = getattr(getattr(self.gui, "library_view", None), "model", lambda: None)()
-                notify = getattr(model, "books_deleted", None)
+                notify = getattr(model, "ids_deleted", None)
                 if callable(notify):
-                    notify(set(moved_ids))
+                    try:
+                        notify(moved_ids)
+                    except Exception:
+                        warnings.append("gui_model_notification_failed")
             final = dict(result)
-            final.update({"destination_library": str(context["destination_path"]), "moved_to_trash": moved_ids})
+            final.update({"destination_library": str(context["destination_path"]), "moved_to_trash": moved_ids, "warnings": warnings})
             self._update_job(
                 job_id,
                 status="completed",
