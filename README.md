@@ -97,9 +97,10 @@ A non-loopback bind is refused without `CALIBRE_UMCP_BRIDGE_TOKEN`. If a token i
 * `calibre-umcp`, or `python -m calibre_umcp.server`, is the older read-only compatibility server. With no flags it uses stdio. With `--http --port N` it serves MCP at `/mcp`, because that transport comes from `umcp.MCPServer` itself.
 * If that compatibility server is pointed at `CALIBRE_UMCP_BRIDGE_URL`, it expects the older JSON-RPC helper endpoint such as `http://127.0.0.1:9000/rpc`, not the released plugin `/mcp` endpoint.
 
-The [architecture notes][arch] cover the process boundary, the [design notes][design] explain the implementation choices, the [Calibre 9.12 API map][api] keeps the exact mutation audit in one place, and the [plugin README][plugin] focuses on the ZIP and container path.
+The [architecture notes][arch] cover the process boundary, the [design notes][design] explain the implementation choices, the [multiple-library design][libraries] defines discovery, inactive reads, switching and cross-library duplicate checks, the [Calibre 9.12 API map][api] keeps the exact mutation audit in one place, and the [plugin README][plugin] focuses on the ZIP and container path.
 
 [api]: docs/calibre-9.12-api-map.md
 [arch]: docs/architecture.md
 [design]: docs/design.md
+[libraries]: docs/multiple-libraries.md
 [plugin]: plugins/README.md

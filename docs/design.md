@@ -38,6 +38,12 @@ Short database changes run synchronously on the GUI thread, because that is the 
 
 The bridge keeps its own stable job IDs alongside Calibre's native ones. That lets it expose one consistent audit trail and say what actually happened when cancellation arrives at an awkward moment: copy can stop between books, move can finish destination verification and still retain the source, save-to-disk can cancel before publication, and SMTP submission can succeed before a cancellation request takes effect.
 
+## Multiple Libraries Without Hidden State Changes
+
+Read-only access to configured inactive libraries should use Calibre's own GUI library broker and secondary database handles. It must not switch the visible GUI library as a side effect. Book references therefore need both a stable, UI-configured library alias and a book ID.
+
+GUI switching is a separate mutation, checked against Calibre's job and pending-question guards. Other mutations remain active-library-only and reject stale active-library state. The [multiple-library design](multiple-libraries.md) defines the MCP schemas, alias registry, duplicate comparison rules, switching contract and test plan.
+
 ## Content URLs Stay Narrow
 
 `content_server_status_readonly()` reports only a concrete authenticated base URL from an already-running Calibre content server. Wildcard binds, disabled auth and temporary public links are all treated as out of scope. The bridge is reporting an existing service, not inventing a sharing layer.
