@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 
 BRIDGE_VERSION = PLUGIN_VERSION_STRING
 SCHEMA_VERSION = 2
-TOOLSET_VERSION = 3
+TOOLSET_VERSION = 4
 SUPPORTED_CALIBRE_MUTATION_VERSION = (9, 12, 0)
 
 
@@ -491,7 +491,7 @@ class CalibreRpcBridge:
     @staticmethod
     def _xml_root(data: bytes, failure_code: str = "FORMAT_READ_FAILED"):
         if b"<!DOCTYPE" in data.upper() or b"<!ENTITY" in data.upper():
-            raise BridgeMethodError("FORMAT_READ_FAILED", "Unsafe XML declarations are not inspected")
+            raise BridgeMethodError("FORMAT_READ_FAILED", "UNSAFE_XML_DECLARATION: Unsafe XML declarations are not inspected")
         try:
             return ElementTree.fromstring(data)
         except ElementTree.ParseError as exc:
@@ -691,42 +691,54 @@ class CalibreRpcBridge:
         if not record.get("publisher"):
             metadata_warnings.append("missing_publisher")
         format_scores = []
+        inspection_errors = []
+        degradable_codes = {"FORMAT_READ_FAILED", "INSPECTION_LIMIT_EXCEEDED", "INSPECTION_TIMEOUT"}
         for fmt in selected:
             if fmt not in available:
                 raise BridgeMethodError("FORMAT_NOT_FOUND", "A requested format is unavailable")
             if fmt != "EPUB":
                 format_scores.append({"format": fmt, "score": 0, "reasons": [], "warnings": ["unsupported_format"]})
                 continue
-            inspection = self._inspect_book_format({"library": alias, "book_id": book_id, "format": fmt})
-            score = 30
+            score = 45
             reasons = ["format_preferred:epub"]
-            warnings = list(inspection["container"]["warnings"])
-            score += 15
-            if inspection["container"]["valid"]:
-                score += 20
-                reasons.append("container_valid")
+            warnings = []
+            try:
+                inspection = self._inspect_book_format({"library": alias, "book_id": book_id, "format": fmt})
+            except BridgeMethodError as exc:
+                if exc.code not in degradable_codes:
+                    raise
+                reason = exc.message.split(":", 1)[0] if re.fullmatch(r"[A-Z0-9_]+:.*", exc.message) else exc.code
+                warning = exc.code.casefold()
+                warnings.extend([warning, "inspection_failed"])
+                inspection_errors.append({"format": fmt, "code": exc.code, "reason": reason})
+                score -= 15
             else:
-                score -= 20
-                warnings.append("container_invalid")
-            if inspection["structure"]["has_cover"]:
-                score += 8
-                reasons.append("has_cover")
-            else:
-                warnings.append("missing_cover")
-            if inspection["structure"]["has_toc"]:
-                score += 10
-                reasons.append("has_toc")
-            else:
-                warnings.append("missing_toc")
-            identifiers = inspection["metadata"]["identifiers_present"]
-            if identifiers:
-                score += 7
-                reasons.extend(f"identifier:{identifier}" for identifier in identifiers)
-            else:
-                warnings.append("missing_identifiers")
-            if inspection["content_signals"]["suspiciously_short"]:
-                score -= 20
-                warnings.append("suspiciously_small_file")
+                warnings.extend(inspection["container"]["warnings"])
+                if inspection["container"]["valid"]:
+                    score += 20
+                    reasons.append("container_valid")
+                else:
+                    score -= 20
+                    warnings.append("container_invalid")
+                if inspection["structure"]["has_cover"]:
+                    score += 8
+                    reasons.append("has_cover")
+                else:
+                    warnings.append("missing_cover")
+                if inspection["structure"]["has_toc"]:
+                    score += 10
+                    reasons.append("has_toc")
+                else:
+                    warnings.append("missing_toc")
+                identifiers = inspection["metadata"]["identifiers_present"]
+                if identifiers:
+                    score += 7
+                    reasons.extend(f"identifier:{identifier}" for identifier in identifiers)
+                else:
+                    warnings.append("missing_identifiers")
+                if inspection["content_signals"]["suspiciously_short"]:
+                    score -= 20
+                    warnings.append("suspiciously_small_file")
             if "generic_import_title" in metadata_warnings:
                 score -= 15
             if "metadata_title_missing" in metadata_warnings:
@@ -735,7 +747,8 @@ class CalibreRpcBridge:
                 score -= 10
             format_scores.append({"format": fmt, "score": max(0, min(100, score)), "reasons": sorted(set(reasons)), "warnings": sorted(set(warnings))})
         best = max(format_scores, key=lambda item: (item["score"], item["format"] == "EPUB"))
-        grade = "good" if best["score"] >= 75 else "fair" if best["score"] >= 50 else "poor"
+        best_failed = "inspection_failed" in best["warnings"]
+        grade = "unknown" if best_failed else "good" if best["score"] >= 75 else "fair" if best["score"] >= 50 else "poor"
         return {
             "schema_version": SCHEMA_VERSION,
             "library": alias,
@@ -745,6 +758,7 @@ class CalibreRpcBridge:
             "best_format": best["format"] if best["score"] > 0 else None,
             "format_scores": format_scores,
             "metadata_warnings": sorted(metadata_warnings),
+            "inspection_errors": inspection_errors,
         }
 
     def _compare_book_quality(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -756,16 +770,35 @@ class CalibreRpcBridge:
         left = self._assess_book_quality(left_input)
         right = self._assess_book_quality(right_input)
         delta = right["score"] - left["score"]
-        keep = "right" if delta > 0 else "left" if delta < 0 else "undetermined"
+        left_failed = bool(left["inspection_errors"])
+        right_failed = bool(right["inspection_errors"])
+        if left_failed and right_failed:
+            keep = "undetermined"
+        elif left_failed:
+            keep = "right"
+        elif right_failed:
+            keep = "left"
+        else:
+            keep = "right" if delta > 0 else "left" if delta < 0 else "undetermined"
         reasons = []
+        if left_failed:
+            reasons.append("left_candidate_inspection_failed")
+        if right_failed:
+            reasons.append("right_candidate_inspection_failed")
         if left["best_format"] != right["best_format"]:
             preferred = "left" if left["best_format"] == "EPUB" else "right" if right["best_format"] == "EPUB" else None
             if preferred:
                 reasons.append(f"{preferred}_has_preferred_format")
-        if delta:
+        if delta and keep != "undetermined" and not (left_failed or right_failed):
             reasons.append(f"{keep}_has_higher_quality_score")
-        confidence = "high" if abs(delta) >= 20 else "medium" if abs(delta) >= 8 else "low"
-        compact = lambda item: {"library": item["library"], "book_id": item["book_id"], "score": item["score"], "best_format": item["best_format"]}
+        confidence = "low" if left_failed or right_failed else "high" if abs(delta) >= 20 else "medium" if abs(delta) >= 8 else "low"
+        compact = lambda item: {
+            "library": item["library"],
+            "book_id": item["book_id"],
+            "score": item["score"],
+            "best_format": item["best_format"],
+            "inspection_errors": item["inspection_errors"],
+        }
         return {
             "schema_version": SCHEMA_VERSION,
             "left": compact(left),
@@ -887,72 +920,148 @@ class CalibreRpcBridge:
             "next_cursor": self._next_cursor(offset + limit, "duplicates", arguments) if truncated else None,
         }
 
+    def _cross_library_cursor(
+        self, source_offset: int, target_index: int, target_offset: int, arguments: dict[str, Any]
+    ) -> str:
+        payload = {
+            "v": 1,
+            "s": source_offset,
+            "ti": target_index,
+            "to": target_offset,
+            "f": self._cursor_fingerprint("cross-library", arguments),
+        }
+        return base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
+
+    def _cross_library_cursor_offsets(self, cursor: Any, arguments: dict[str, Any]) -> tuple[int, int, int]:
+        if not cursor:
+            return 0, 0, 0
+        try:
+            payload = json.loads(base64.urlsafe_b64decode(str(cursor) + "=" * (-len(str(cursor)) % 4)))
+            offsets = (int(payload["s"]), int(payload["ti"]), int(payload["to"]))
+            if (
+                payload.get("v") != 1
+                or payload.get("f") != self._cursor_fingerprint("cross-library", arguments)
+                or any(value < 0 for value in offsets)
+            ):
+                raise ValueError
+            return offsets
+        except Exception as exc:
+            raise BridgeMethodError("CURSOR_INVALID", "The cross-library cursor does not match this request") from exc
+
     def _find_cross_library_duplicates(self, params: dict[str, Any]) -> dict[str, Any]:
         source_db, source_alias = self._resolve_library(params.get("source_library"))
         targets = params.get("target_libraries")
         if not isinstance(targets, list) or not targets or len(targets) > 16:
             raise BridgeMethodError("CROSS_LIBRARY_TARGETS_REQUIRED", "One to sixteen target library aliases are required")
-        target_pairs = [self._resolve_library(alias) for alias in targets]
-        if source_alias in {alias for _db, alias in target_pairs}:
-            raise BridgeMethodError("CROSS_LIBRARY_SAME_LIBRARY", "Source and target libraries must differ")
-        limit = max(1, min(int(params.get("limit") or 100), 500))
+        canonical_targets = []
+        active_alias = self._active_alias()
+        for selector in targets:
+            alias = active_alias if str(selector) in {"current", active_alias} else str(selector)
+            if alias == source_alias:
+                raise BridgeMethodError("CROSS_LIBRARY_SAME_LIBRARY", "Source and target libraries must differ")
+            if alias in canonical_targets:
+                raise BridgeMethodError("CROSS_LIBRARY_TARGETS_REQUIRED", "Target library aliases must be unique")
+            entry = next((item for item in self.library_registry if item.get("alias") == alias), None)
+            if entry is None:
+                raise BridgeMethodError("LIBRARY_ALIAS_UNKNOWN", "The requested library alias is not configured")
+            if not entry.get("read", True):
+                raise BridgeMethodError("LIBRARY_READ_DENIED", "Read access is disabled for the requested library")
+            if not (Path(str(entry["path"])) / "metadata.db").is_file():
+                raise BridgeMethodError("LIBRARY_UNAVAILABLE", "The requested library is unavailable")
+            canonical_targets.append(alias)
+        source_limit = max(1, min(int(params.get("limit") or 5), 25))
+        target_limit = max(1, min(int(params.get("target_limit") or 100), 250))
         per_book = max(1, min(int(params.get("candidate_limit_per_book") or 20), 100))
         query = str(params.get("source_query") or "")
+        arguments = {
+            "source_library": source_alias,
+            "target_libraries": canonical_targets,
+            "source_query": query,
+            "limit": source_limit,
+            "target_limit": target_limit,
+            "candidate_limit_per_book": per_book,
+        }
+        source_offset, target_index, target_offset = self._cross_library_cursor_offsets(params.get("cursor"), arguments)
+        if target_index >= len(canonical_targets):
+            raise BridgeMethodError("CURSOR_INVALID", "The cross-library cursor is outside the requested targets")
         all_source_ids = sorted(source_db.search_getting_ids(query, None)) if query else self._all_book_ids(source_db)
-        source_ids = [int(book_id) for book_id in all_source_ids[:limit]]
-        indexes = []
-        indexed_target_count = 0
-        target_index_truncated = False
-        for target_db, target_alias in target_pairs:
-            target_ids = self._all_book_ids(target_db)
-            remaining = max(0, 2000 - indexed_target_count)
-            selected_target_ids = target_ids[:remaining]
-            if len(selected_target_ids) < len(target_ids):
-                target_index_truncated = True
-            target_items = [self._metadata(target_db, book_id, target_alias) for book_id in selected_target_ids]
-            indexed_target_count += len(target_items)
-            indexes.append((target_alias, target_items))
+        if source_offset >= len(all_source_ids) and all_source_ids:
+            raise BridgeMethodError("CURSOR_INVALID", "The cross-library cursor is past the source result set")
+        source_ids = [int(book_id) for book_id in all_source_ids[source_offset: source_offset + source_limit]]
+        if not source_ids:
+            return {
+                "source_library": source_alias,
+                "target_libraries": canonical_targets,
+                "source_scanned": 0,
+                "scanned_source_count": 0,
+                "source_total_known": len(all_source_ids),
+                "target_libraries_scanned": 0,
+                "target_library_scanned": None,
+                "target_books_scanned": 0,
+                "candidate_queries": 0,
+                "matches": [],
+                "truncated": False,
+                "next_cursor": None,
+            }
+        target_alias = canonical_targets[target_index]
+        target_db, target_alias = self._resolve_library(target_alias)
+        all_target_ids = self._all_book_ids(target_db)
+        if target_offset >= len(all_target_ids) and all_target_ids:
+            raise BridgeMethodError("CURSOR_INVALID", "The cross-library cursor is past the target result set")
+        target_ids = all_target_ids[target_offset: target_offset + target_limit]
+        target_items = [self._metadata(target_db, book_id, target_alias) for book_id in target_ids]
         matches = []
-        total_candidates = 0
-        scanned_source_count = 0
+        candidate_queries = 0
         for source_id in source_ids:
-            scanned_source_count += 1
             source = self._metadata(source_db, source_id, source_alias)
             source_identifiers, source_title = self._normalised_match_fields(source)
             candidates = []
-            for target_alias, target_items in indexes:
-                for candidate in target_items:
-                    candidate_identifiers, candidate_title = self._normalised_match_fields(candidate)
-                    shared = sorted(
-                        kind for kind, value in source_identifiers.items()
-                        if candidate_identifiers.get(kind) == value
-                    )
-                    reasons = [f"identifier:{kind}" for kind in shared]
-                    if source_title[0] and source_title == candidate_title:
-                        reasons.append("title_authors")
-                    if not reasons:
-                        continue
-                    conflicts = any(
-                        kind in candidate_identifiers and candidate_identifiers[kind] != value
-                        for kind, value in source_identifiers.items()
-                    )
-                    confidence = "high" if shared and not conflicts else "medium"
-                    candidates.append({**candidate, "reasons": reasons, "confidence": confidence})
-                    total_candidates += 1
-                    if len(candidates) >= per_book or total_candidates >= 2000:
-                        break
-                if len(candidates) >= per_book or total_candidates >= 2000:
+            for candidate in target_items:
+                candidate_queries += 1
+                candidate_identifiers, candidate_title = self._normalised_match_fields(candidate)
+                shared = sorted(
+                    kind for kind, value in source_identifiers.items()
+                    if candidate_identifiers.get(kind) == value
+                )
+                reasons = [f"identifier:{kind}" for kind in shared]
+                if source_title[0] and source_title == candidate_title:
+                    reasons.append("title_authors")
+                if not reasons:
+                    continue
+                conflicts = any(
+                    kind in candidate_identifiers and candidate_identifiers[kind] != value
+                    for kind, value in source_identifiers.items()
+                )
+                candidates.append({
+                    **candidate,
+                    "reasons": reasons,
+                    "confidence": "high" if shared and not conflicts else "medium",
+                })
+                if len(candidates) >= per_book:
                     break
             if candidates:
                 matches.append({"source": source, "candidates": candidates})
-            if total_candidates >= 2000:
-                break
+        next_offsets = None
+        if target_offset + len(target_ids) < len(all_target_ids):
+            next_offsets = (source_offset, target_index, target_offset + len(target_ids))
+        elif target_index + 1 < len(canonical_targets):
+            next_offsets = (source_offset, target_index + 1, 0)
+        elif source_offset + len(source_ids) < len(all_source_ids):
+            next_offsets = (source_offset + len(source_ids), 0, 0)
+        next_cursor = self._cross_library_cursor(*next_offsets, arguments) if next_offsets else None
         return {
             "source_library": source_alias,
-            "target_libraries": [alias for _db, alias in target_pairs],
-            "scanned_source_count": scanned_source_count,
+            "target_libraries": canonical_targets,
+            "source_scanned": len(source_ids),
+            "scanned_source_count": len(source_ids),
+            "source_total_known": len(all_source_ids),
+            "target_libraries_scanned": 1,
+            "target_library_scanned": target_alias,
+            "target_books_scanned": len(target_items),
+            "candidate_queries": candidate_queries,
             "matches": matches,
-            "truncated": len(source_ids) < len(all_source_ids) or target_index_truncated or total_candidates >= 2000,
+            "truncated": next_cursor is not None,
+            "next_cursor": next_cursor,
         }
 
     def _switch_library(self, params: dict[str, Any]) -> dict[str, Any]:

@@ -302,11 +302,12 @@ class FakeGui:
 
 class CalibreRpcBridgeTests(unittest.TestCase):
     @staticmethod
-    def write_epub(path: Path, title="Example", author="Author", cover=True, toc=True, body=None, identifier="urn:isbn:9780000000002"):
+    def write_epub(path: Path, title="Example", author="Author", cover=True, toc=True, body=None, identifier="urn:isbn:9780000000002", unsafe_xml=False):
         body = body or ("Chapter text. " * 600)
+        doctype = '<!DOCTYPE package [<!ENTITY unsafe "blocked">]>' if unsafe_xml else ""
         manifest_extra = '<item id="cover" href="cover.jpg" media-type="image/jpeg" properties="cover-image"/>' if cover else ""
         nav_item = '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>' if toc else ""
-        package = f'''<?xml version="1.0" encoding="UTF-8"?>
+        package = f'''<?xml version="1.0" encoding="UTF-8"?>{doctype}
         <package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
           <metadata><dc:title>{title}</dc:title><dc:creator>{author}</dc:creator>{f'<dc:identifier>{identifier}</dc:identifier>' if identifier else ''}</metadata>
           <manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>{manifest_extra}{nav_item}</manifest>
@@ -443,6 +444,34 @@ class CalibreRpcBridgeTests(unittest.TestCase):
             })
             self.assertEqual(compared["recommendation"]["keep"], "right")
             self.assertIn("right_has_higher_quality_score", compared["recommendation"]["reasons"])
+
+    def test_quality_assessment_and_comparison_degrade_on_safe_inspection_failure(self):
+        gui = FakeGui()
+        bridge = CalibreRpcBridge(gui)
+        with tempfile.TemporaryDirectory() as root:
+            malformed = Path(root) / "malformed.epub"
+            valid = Path(root) / "valid.epub"
+            self.write_epub(malformed, unsafe_xml=True)
+            self.write_epub(valid, title="Other", author="Someone")
+            gui.current_db.format_paths[(1, "EPUB")] = str(malformed)
+            gui.current_db.format_paths[(3, "EPUB")] = str(valid)
+            assessed = bridge.dispatch("assess_book_quality", {"book_id": 1, "formats": ["EPUB"]})
+            self.assertEqual(assessed["grade"], "unknown")
+            self.assertEqual(assessed["inspection_errors"], [{
+                "format": "EPUB",
+                "code": "FORMAT_READ_FAILED",
+                "reason": "UNSAFE_XML_DECLARATION",
+            }])
+            self.assertIn("format_read_failed", assessed["format_scores"][0]["warnings"])
+            self.assertIn("inspection_failed", assessed["format_scores"][0]["warnings"])
+            compared = bridge.dispatch("compare_book_quality", {
+                "left": {"book_id": 1, "formats": ["EPUB"]},
+                "right": {"book_id": 3, "formats": ["EPUB"]},
+            })
+            self.assertEqual(compared["recommendation"]["keep"], "right")
+            self.assertEqual(compared["recommendation"]["confidence"], "low")
+            self.assertIn("left_candidate_inspection_failed", compared["recommendation"]["reasons"])
+            self.assertEqual(compared["left"]["inspection_errors"][0]["reason"], "UNSAFE_XML_DECLARATION")
 
     def test_format_inspection_has_stable_failures_and_limits(self):
         gui = FakeGui()
@@ -700,6 +729,40 @@ class CalibreRpcBridgeTests(unittest.TestCase):
             })
             self.assertEqual(selective["scanned_source_count"], 1)
             self.assertFalse(selective["truncated"])
+            chunk = bridge.dispatch("find_cross_library_duplicates", {
+                "source_library": "incoming",
+                "target_libraries": ["main"],
+                "source_query": "Shared ISBN",
+                "limit": 1,
+                "target_limit": 1,
+            })
+            self.assertTrue(chunk["truncated"])
+            self.assertTrue(chunk["next_cursor"])
+            self.assertEqual(chunk["source_scanned"], 1)
+            self.assertEqual(chunk["source_total_known"], 1)
+            self.assertEqual(chunk["target_libraries_scanned"], 1)
+            self.assertEqual(chunk["target_books_scanned"], 1)
+            self.assertEqual(chunk["candidate_queries"], 1)
+            continued = bridge.dispatch("find_cross_library_duplicates", {
+                "source_library": "incoming",
+                "target_libraries": ["main"],
+                "source_query": "Shared ISBN",
+                "limit": 1,
+                "target_limit": 1,
+                "cursor": chunk["next_cursor"],
+            })
+            self.assertFalse(continued["truncated"])
+            self.assertIsNone(continued["next_cursor"])
+            with self.assertRaises(BridgeMethodError) as wrong_cursor:
+                bridge.dispatch("find_cross_library_duplicates", {
+                    "source_library": "incoming",
+                    "target_libraries": ["archive"],
+                    "source_query": "Shared ISBN",
+                    "limit": 1,
+                    "target_limit": 1,
+                    "cursor": chunk["next_cursor"],
+                })
+            self.assertEqual(wrong_cursor.exception.code, "CURSOR_INVALID")
 
             with self.assertRaises(BridgeMethodError) as rejected:
                 bridge.dispatch("update_book_metadata", {"library": "main", "book_id": 1, "changes": {}})

@@ -53,7 +53,9 @@ MCP clients should reconnect and refresh `tools/list` after plugin upgrades when
 
 The MCP-only quality workflow adds `get_book_formats_readonly`, `inspect_book_format_readonly`, `assess_book_quality_readonly` and `compare_book_quality_readonly`. The first release deeply inspects EPUB only. It reports path-free size and modification metadata, container validity, embedded metadata agreement, cover and TOC structure, bounded text metrics and explainable scoring reasons.
 
-Inspection never returns ebook text or internal paths. Files, archive entries, expanded size, scanned content and elapsed time are bounded; unsupported formats, missing files, read failures and exceeded limits use stable structured error codes. All database access remains library-broker-backed and the visible GUI library is never switched implicitly.
+Inspection never returns ebook text or internal paths. Files, archive entries, expanded size, scanned content and elapsed time are bounded; unsupported formats, missing files, read failures and exceeded limits use stable structured error codes. Assessment and comparison degrade safe inspection failures into penalized `grade: unknown` results with machine-readable `inspection_errors`, rather than aborting duplicate triage. All database access remains library-broker-backed and the visible GUI library is never switched implicitly.
+
+Cross-library duplicate matching scans one source chunk against one target-library segment per call. Use `next_cursor` unchanged with the same arguments until it becomes null. `source_scanned`, `source_total_known`, `target_libraries_scanned`, `target_books_scanned` and `candidate_queries` expose bounded progress without revealing paths.
 
 ## Mutation Gate And Current Limits
 

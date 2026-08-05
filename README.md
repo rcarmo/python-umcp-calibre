@@ -17,11 +17,11 @@ Read-only discovery is small on purpose. Agents should start with `capabilities_
 * `assess_book_quality_readonly(...)` assigns a conservative score with stable, explainable reason and warning codes; EPUB is the only deeply inspected format in this first release.
 * `compare_book_quality_readonly(left, right)` compares two library-scoped records entirely through MCP and recommends which candidate to keep, but never mutates either record.
 * `find_duplicates_readonly(library="current", limit=1000)` groups probable duplicates through Calibre's 9.12 `new_api.all_book_ids()` enumeration.
-* `find_cross_library_duplicates_readonly(source_library, target_libraries, limit=100)` compares configured libraries by normalized identifiers and title/authors without switching the visible GUI library.
+* `find_cross_library_duplicates_readonly(source_library, target_libraries, limit=5, target_limit=100, cursor="")` compares one bounded source/target segment by normalized identifiers and title/authors without switching the visible GUI library. Partial responses include progress fields and an opaque `next_cursor`.
 * `content_server_status_readonly()` reports only an existing authenticated content-server base URL, and only when the bind is concrete enough to be honest about.
 * `list_bridge_jobs_readonly()` and `get_bridge_job_status_readonly(job_id)` expose the bridge's own job and audit records.
 
-Quality inspection never returns absolute paths or ebook text. EPUB work is bounded to 64 MiB files, 4096 archive entries, 256 MiB expanded data, 8 MiB of content scanning and five seconds. Unsupported formats and unavailable, unreadable, oversized or timed-out inspections return stable structured codes.
+Quality inspection never returns absolute paths or ebook text. EPUB work is bounded to 64 MiB files, 4096 archive entries, 256 MiB expanded data, 8 MiB of content scanning and five seconds. Direct inspection calls return stable errors for unsupported, unavailable, unreadable, oversized or timed-out formats. Quality assessment and comparison instead degrade safe inspection failures into penalized normal results with `inspection_errors`, so one malformed candidate cannot abort duplicate triage.
 
 Mutations appear only when all four conditions hold:
 

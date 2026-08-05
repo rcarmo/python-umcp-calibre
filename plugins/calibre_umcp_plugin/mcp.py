@@ -186,17 +186,24 @@ class CalibrePluginMCPServer(MCPServer):
     def tool_describe_tool_readonly(self, tool_name: str) -> dict[str, Any]:
         """Describe one implemented tool without loading every detailed description into context."""
         details = {
+            "capabilities_readonly": {"arguments": {}, "returns": "toolset metadata, availability, limits, stable errors and compact tool summaries"},
+            "describe_tool_readonly": {"arguments": {"tool_name": "currently exposed implemented tool name"}, "returns": "arguments and result guidance for one tool"},
             "bridge_status_readonly": {"arguments": {}, "returns": "version and active library"},
             "list_libraries_readonly": {"arguments": {}, "returns": "redacted configured library aliases and active generation"},
             "search_books_readonly": {"arguments": {"query": "Calibre query", "limit": "default 20, max 500", "library": "configured alias or current", "cursor": "opaque continuation"}},
             "get_book_metadata_readonly": {"arguments": {"book_id": "integer Calibre id", "library": "configured alias or current"}},
+            "get_book_formats_readonly": {"arguments": {"book_id": "integer Calibre id", "library": "configured alias or current"}, "returns": "path-free format sizes, modification times and availability"},
+            "inspect_book_format_readonly": {"arguments": {"book_id": "integer Calibre id", "format": "EPUB in this release", "library": "configured alias or current", "include_text_sample": "must remain false"}, "returns": "bounded container, metadata, structure and content metrics without text"},
+            "assess_book_quality_readonly": {"arguments": {"book_id": "integer Calibre id", "library": "configured alias or current", "formats": "optional list of up to eight formats"}, "returns": "explainable score plus structured inspection errors"},
+            "compare_book_quality_readonly": {"arguments": {"left": "library and book_id object", "right": "library and book_id object", "policy": "prefer_epub_then_metadata"}, "returns": "quality summaries and a non-mutating recommendation"},
             "find_duplicates_readonly": {"arguments": {"limit": "default 1000, max 5000", "library": "configured alias or current", "cursor": "opaque continuation"}},
-            "find_cross_library_duplicates_readonly": {"arguments": {"source_library": "configured alias", "target_libraries": "one to sixteen configured aliases", "source_query": "optional Calibre query", "limit": "default 100, max 500", "candidate_limit_per_book": "default 20, max 100"}},
+            "find_cross_library_duplicates_readonly": {"arguments": {"source_library": "configured alias", "target_libraries": "one to sixteen configured aliases", "source_query": "optional Calibre query", "limit": "source chunk, default 5, max 25", "target_limit": "target chunk, default 100, max 250", "candidate_limit_per_book": "default 20, max 100", "cursor": "opaque continuation"}, "returns": "one bounded target segment, progress fields, partial matches and next_cursor"},
             "content_server_status_readonly": {"arguments": {}, "returns": "running/auth status and a base URL only for authenticated concrete binds"},
             "list_bridge_jobs_readonly": {"arguments": {}},
             "get_bridge_job_status_readonly": {"arguments": {"job_id": "bridge audit id"}},
         }
         mutation_details = {
+            "capabilities_mutation": {"arguments": {}, "returns": "mutation policy, active-library guards and implemented mutation summaries"},
             "update_book_metadata_mutation": {
                 "arguments": {"book_id": "integer Calibre id", "changes": "validated metadata fields", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
                 "returns": "completed bridge job record",
@@ -333,16 +340,20 @@ class CalibrePluginMCPServer(MCPServer):
         source_library: str,
         target_libraries: list[str],
         source_query: str = "",
-        limit: int = 100,
+        limit: int = 5,
+        target_limit: int = 100,
         candidate_limit_per_book: int = 20,
+        cursor: str = "",
     ) -> dict[str, Any]:
-        """Compare source books with selected configured libraries without switching the GUI."""
+        """Scan one bounded source/target segment and return an opaque continuation cursor."""
         return self._call_read("find_cross_library_duplicates", {
             "source_library": source_library,
             "target_libraries": target_libraries,
             "source_query": source_query,
             "limit": limit,
+            "target_limit": target_limit,
             "candidate_limit_per_book": candidate_limit_per_book,
+            "cursor": cursor,
         })
 
     def tool_content_server_status_readonly(self) -> dict[str, Any]:

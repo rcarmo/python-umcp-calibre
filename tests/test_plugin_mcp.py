@@ -78,7 +78,7 @@ class PluginMCPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "calibre-umcp")
         self.assertEqual(initialized["result"]["serverInfo"]["schemaVersion"], "2")
-        self.assertEqual(initialized["result"]["serverInfo"]["toolsetVersion"], "3")
+        self.assertEqual(initialized["result"]["serverInfo"]["toolsetVersion"], "4")
         self.assertEqual(initialized["result"]["capabilities"], {"tools": {"listChanged": False}})
 
         _, listed = self.post(base, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
@@ -98,6 +98,16 @@ class PluginMCPTests(unittest.TestCase):
         search_schema = tools["search_books_readonly"]["inputSchema"]["properties"]
         self.assertIn("library", search_schema)
         self.assertIn("cursor", search_schema)
+        cross_schema = tools["find_cross_library_duplicates_readonly"]["inputSchema"]["properties"]
+        self.assertIn("cursor", cross_schema)
+        self.assertIn("target_limit", cross_schema)
+        description_server = CalibrePluginMCPServer(FakeGui())
+        self.addCleanup(description_server.bridge.close)
+        exposed_names = {tool["name"] for tool in description_server.discover_tools()["tools"]}
+        for name in exposed_names:
+            described = description_server.tool_describe_tool_readonly(name)
+            self.assertEqual(described["name"], name)
+            self.assertIn("arguments", described)
 
         _, capabilities = self.post(
             base,
@@ -105,7 +115,7 @@ class PluginMCPTests(unittest.TestCase):
         )
         content = capabilities["result"]["structuredContent"]
         self.assertEqual(content["schema_version"], 2)
-        self.assertEqual(content["toolset_version"], 3)
+        self.assertEqual(content["toolset_version"], 4)
         self.assertFalse(content["cross_library_configured"])
         self.assertFalse(content["cross_library_available"])
         self.assertEqual(content["readable_target_count"], 0)
@@ -155,6 +165,8 @@ class PluginMCPTests(unittest.TestCase):
         described = enabled.tool_describe_tool_readonly("update_book_metadata_mutation")
         self.assertIn("changes", described["arguments"])
         self.assertEqual(described["args"], described["arguments"])
+        for name in enabled_names:
+            self.assertEqual(enabled.tool_describe_tool_readonly(name)["name"], name)
 
     def test_mutation_tools_expose_optional_active_library_guards_in_schema(self):
         server = self.make_mutation_server()
