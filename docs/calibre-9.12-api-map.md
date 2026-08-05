@@ -1,6 +1,6 @@
-# Calibre 9.11 Mutation API Map
+# Calibre 9.12 Mutation API Map
 
-This map is pinned to Calibre 9.11.0 (`v9.11.0`, upstream commit `b23dfb5d`). The plugin must fail closed when a later release no longer matches the source-contract tests described below. Those tests pin both callable locations and signature prefixes for the audited entry points.
+This map is pinned to Calibre 9.12.0 (`v9.12.0`, upstream commit `993dd95`). The audited callable locations and signature prefixes remain compatible with the 9.11 bridge; the complete source-contract suite passes against the 9.12.0 source tree. The plugin must fail closed when a later release no longer matches those tests.
 
 ## Thread Boundary
 
@@ -138,7 +138,7 @@ The first bridge policy should name the survivor explicitly, add only missing fo
 4. `write_book()` writes covers, OPF sidecars, requested formats and extra files, and for metadata updates stages temporary OPF/JPG artefacts under `tdir` before queueing `update_serialized_metadata` work to the pool.
 5. `consume_results()`, `do_one_update()` and `updating_metadata_finished()` drain worker results, collate per-book errors, show the final report and tear everything down via `break_cycles()`.
 
-`Saver` is tied to a progress dialog and a queued GUI lifecycle, so the bridge uses the lower-level `calibre.library.save_to_disk.save_to_disk()` entry point inside a native `ThreadedJob`. That function retains Calibre's template evaluation, sanitisation, plugboards, cover/OPF handling and format metadata updates without constructing a second GUI dialog. In 9.11.0 it mixes legacy `get_metadata(index_is_id=True)` calls with Cache-only `pref()`, `copy_format_to()` and extra-file methods after dereferencing `db.new_api`; the bridge therefore uses a narrow local adapter around an independent `calibre.db.legacy.LibraryDatabase` handle. The worker writes into a bridge staging directory under an allowlisted export root, checks every collision, then publishes with `os.replace()`. Existing files are moved into a temporary backup first and restored if publication fails.
+`Saver` is tied to a progress dialog and a queued GUI lifecycle, so the bridge uses the lower-level `calibre.library.save_to_disk.save_to_disk()` entry point inside a native `ThreadedJob`. That function retains Calibre's template evaluation, sanitisation, plugboards, cover/OPF handling and format metadata updates without constructing a second GUI dialog. In 9.12.0 it mixes legacy `get_metadata(index_is_id=True)` calls with Cache-only `pref()`, `copy_format_to()` and extra-file methods after dereferencing `db.new_api`; the bridge therefore uses a narrow local adapter around an independent `calibre.db.legacy.LibraryDatabase` handle. The worker writes into a bridge staging directory under an allowlisted export root, checks every collision, then publishes with `os.replace()`. Existing files are moved into a temporary backup first and restored if publication fails.
 
 ## E-mail
 
@@ -161,13 +161,13 @@ The plugin allows only recipients already configured in Calibre and requires an 
 
 `calibre.gui2.ui.Main.start_content_server(check_started=True)` constructs and starts `calibre.srv.embedded.Server` from the saved content-server configuration. The Device action toggles it through this method and `gui.content_server.stop()`.
 
-Authentication is configured elsewhere, not by these GUI entry points. The server preferences expose an `auth` flag plus per-user accounts and library restrictions. In lower-level server code, `calibre.srv.auth.AuthController` implements Basic/Digest auth and one scoped-expiry mechanism for authenticated downloads: an Android-workaround cookie whose path is pinned to the requested endpoint and whose default lifetime is `MAX_AGE_SECONDS = 3600`. This is the only scoped-expiry facility found in the 9.11 GUI/server path audit, and it is an authenticated session cookie rather than a shareable temporary public link.
+Authentication is configured elsewhere, not by these GUI entry points. The server preferences expose an `auth` flag plus per-user accounts and library restrictions. In lower-level server code, `calibre.srv.auth.AuthController` implements Basic/Digest auth and one scoped-expiry mechanism for authenticated downloads: an Android-workaround cookie whose path is pinned to the requested endpoint and whose default lifetime is `MAX_AGE_SECONDS = 3600`. This is the only scoped-expiry facility found in the 9.12 GUI/server path audit, and it is an authenticated session cookie rather than a shareable temporary public link.
 
 There is still no scoped temporary-link facility in the GUI entry points for arbitrary files or books. The bridge may report an existing authenticated content-server URL only when the server is already running on a concrete non-wildcard host, and it must not invent an unauthenticated filesystem URL. Temporary public links remain unsupported unless a lower-level Calibre API with explicit link expiry and scope is identified.
 
 ## Configuration
 
-Calibre plugins commonly use `calibre.utils.config.JSONConfig`. Calibre 9.11 has no general OS credential-store abstraction in its source tree, and its own e-mail settings use Calibre configuration. The bridge token can therefore be stored in a plugin JSON file with Calibre-profile permissions and edited through a masked UI field; documentation must state that it is not hardware-backed secret storage.
+Calibre plugins commonly use `calibre.utils.config.JSONConfig`. Calibre 9.12 has no general OS credential-store abstraction in its source tree, and its own e-mail settings use Calibre configuration. The bridge token can therefore be stored in a plugin JSON file with Calibre-profile permissions and edited through a masked UI field; documentation must state that it is not hardware-backed secret storage.
 
 Environment variables may override host, port and token for container deployment. They can require authentication, but mutation discovery still requires the token to have been explicitly saved in the plugin UI plus the UI mutation switch. An environment-only token cannot enable mutations on its own, and a different override token disables mutation discovery rather than widening it.
 
@@ -185,8 +185,8 @@ Permanent deletion, arbitrary recipients, implicit e-mail conversion, temporary 
 
 The source-tree compatibility server under `src/calibre_umcp/server.py` stays read-only by default and keeps its legacy mutator names as explicit failures. When it is pointed at `CALIBRE_UMCP_BRIDGE_URL`, that optional proxy path still speaks the older `/rpc` JSON-RPC helper rather than the released plugin `/mcp` transport.
 
-`CalibreUmcpPlugin.minimum_calibre_version` is `(9, 11, 0)` because no older release has passed this source/runtime contract. Since Calibre interprets that field as a lower bound, later releases may load the read-only plugin surface, but mutation discovery and execution both require exactly `(9, 11, 0)` and fail closed otherwise.
+`CalibreUmcpPlugin.minimum_calibre_version` is `(9, 12, 0)` because this release targets the newly audited runtime. Since Calibre interprets that field as a lower bound, later releases may load the read-only plugin surface, but mutation discovery and execution both require exactly `(9, 12, 0)` and fail closed otherwise.
 
 ## Monkey-Patch Decision
 
-No monkey patch is used. Database, copy, conversion preparation, save-to-disk and e-mail operations all expose bounded callable entry points in 9.11.0. Any future patch would have to be local to one call, version-checked, restored in `finally`, covered by source-contract tests and no less safe than the corresponding GUI action. Global database or job patches remain prohibited.
+No monkey patch is used. Database, copy, conversion preparation, save-to-disk and e-mail operations all expose bounded callable entry points in 9.12.0. Any future patch would have to be local to one call, version-checked, restored in `finally`, covered by source-contract tests and no less safe than the corresponding GUI action. Global database or job patches remain prohibited.

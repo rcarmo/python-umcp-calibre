@@ -1,8 +1,8 @@
-"""Run with Calibre 9.11.0's embedded Python, not the system Python.
+"""Run with Calibre 9.12.0's embedded Python, not the system Python.
 
 Example:
-    CALIBRE_RUNTIME_ROOT=/opt/calibre-9.11.0 \
-      /opt/calibre-9.11.0/calibre-debug -e tests/calibre_9_11_runtime_integration.py
+    CALIBRE_RUNTIME_ROOT=/opt/calibre-9.12.0 \
+      /opt/calibre-9.12.0/calibre-debug -e tests/calibre_9_12_runtime_integration.py
 """
 
 import json
@@ -32,7 +32,7 @@ def require(condition, detail):
         raise RuntimeError(detail)
 
 
-require(tuple(numeric_version[:3]) == (9, 11, 0), f"Unexpected Calibre version: {numeric_version!r}")
+require(tuple(numeric_version[:3]) == (9, 12, 0), f"Unexpected Calibre version: {numeric_version!r}")
 root = Path(tempfile.mkdtemp(prefix="calibre-umcp-runtime-"))
 source_path = root / "source"
 destination_path = root / "destination"

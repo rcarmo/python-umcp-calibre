@@ -47,7 +47,7 @@ The plugin publishes Streamable HTTP at `POST /mcp` and a small unauthenticated 
 
 ## Mutation Gate And Current Limits
 
-Mutation tools only appear when the runtime is exactly Calibre 9.11.0, a token has been saved in the plugin UI, and mutation discovery is explicitly enabled there. An environment-only token can enforce HTTP auth, but it does not enable mutations by itself, and a different override token disables mutation discovery. In container deployments that means `CALIBRE_UMCP_BRIDGE_TOKEN` is not enough on its own: save the same token in the plugin UI and check Enable implemented mutation tools if you want `capabilities_mutation()` to appear.
+Mutation tools only appear when the runtime is exactly Calibre 9.12.0, a token has been saved in the plugin UI, and mutation discovery is explicitly enabled there. An environment-only token can enforce HTTP auth, but it does not enable mutations by itself, and a different override token disables mutation discovery. In container deployments that means `CALIBRE_UMCP_BRIDGE_TOKEN` is not enough on its own: save the same token in the plugin UI and check Enable implemented mutation tools if you want `capabilities_mutation()` to appear.
 
 Import and replacement paths are confined to configured roots. Exports stay under configured export roots. Destination libraries use an exact UI allowlist. E-mail can only use a recipient already configured in Calibre, and only a format already enabled for that recipient.
 

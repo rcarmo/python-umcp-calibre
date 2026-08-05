@@ -17,7 +17,7 @@ Read-only discovery is small on purpose. Agents should start with `capabilities_
 
 Mutations appear only when all four conditions hold:
 
-* Calibre is running exactly 9.11.0.
+* Calibre is running exactly 9.12.0.
 * The plugin UI has a saved bearer token.
 * The plugin UI has mutation discovery enabled.
 * If `CALIBRE_UMCP_BRIDGE_TOKEN` overrides the token at process start, it matches the UI-saved token. An environment-only token can enforce HTTP auth, but it does not unlock mutations by itself.
@@ -45,7 +45,7 @@ Once that gate opens, `capabilities_mutation()` advertises the current mutators:
 * Short metadata, format, cover, merge and trash mutations are dispatched onto the GUI thread and are not interruptible once the database call starts. Longer operations use Calibre's own job machinery, and bridge job records tell the truth about partial work and delayed cancellation instead of pretending a killed job changed nothing.
 * Permanent deletion, arbitrary recipients, automatic e-mail conversion, public temporary links, device operations, and the obsolete singular `copy_book` and `move_book` methods are not supported. The compatibility server under `src/calibre_umcp/server.py` also keeps legacy mutator names such as `convert_book`, `copy_book`, `move_book_destructive`, and `email_book` as explicit failures.
 
-This release is source-contract and runtime tested against exactly Calibre 9.11.0. The plugin declares 9.11.0 as its minimum so later releases may still load the read-only surface, but mutation discovery and execution fail closed until that exact runtime has been audited again.
+This release is source-contract and runtime tested against exactly Calibre 9.12.0. The plugin declares 9.12.0 as its minimum so later releases may still load the read-only surface, but mutation discovery and execution fail closed until that exact runtime has been audited again.
 
 ## Building It
 
@@ -97,9 +97,9 @@ A non-loopback bind is refused without `CALIBRE_UMCP_BRIDGE_TOKEN`. If a token i
 * `calibre-umcp`, or `python -m calibre_umcp.server`, is the older read-only compatibility server. With no flags it uses stdio. With `--http --port N` it serves MCP at `/mcp`, because that transport comes from `umcp.MCPServer` itself.
 * If that compatibility server is pointed at `CALIBRE_UMCP_BRIDGE_URL`, it expects the older JSON-RPC helper endpoint such as `http://127.0.0.1:9000/rpc`, not the released plugin `/mcp` endpoint.
 
-The [architecture notes][arch] cover the process boundary, the [design notes][design] explain the implementation choices, the [Calibre 9.11 API map][api] keeps the exact mutation audit in one place, and the [plugin README][plugin] focuses on the ZIP and container path.
+The [architecture notes][arch] cover the process boundary, the [design notes][design] explain the implementation choices, the [Calibre 9.12 API map][api] keeps the exact mutation audit in one place, and the [plugin README][plugin] focuses on the ZIP and container path.
 
-[api]: docs/calibre-9.11-api-map.md
+[api]: docs/calibre-9.12-api-map.md
 [arch]: docs/architecture.md
 [design]: docs/design.md
 [plugin]: plugins/README.md

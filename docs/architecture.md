@@ -45,7 +45,7 @@ capabilities_readonly
 
 ## Mutation Gate
 
-The default advertised surface is read-only. Mutation discovery appears only when a token was saved in the Calibre UI, mutations were explicitly enabled there, the runtime is exactly Calibre 9.11.0, and any `CALIBRE_UMCP_BRIDGE_TOKEN` override still matches the UI-saved token. An environment-only token can require HTTP auth, but it cannot unlock mutations on its own. In container deployments that means the environment token gets you authenticated requests, not mutation discovery, until the same token is saved in the UI and the mutation checkbox is enabled.
+The default advertised surface is read-only. Mutation discovery appears only when a token was saved in the Calibre UI, mutations were explicitly enabled there, the runtime is exactly Calibre 9.12.0, and any `CALIBRE_UMCP_BRIDGE_TOKEN` override still matches the UI-saved token. An environment-only token can require HTTP auth, but it cannot unlock mutations on its own. In container deployments that means the environment token gets you authenticated requests, not mutation discovery, until the same token is saved in the UI and the mutation checkbox is enabled.
 
 Paths and destinations come from UI allowlists rather than request-time host access. Import and cover files must live under configured import roots, exports must stay under configured export roots, destination libraries must match the UI allowlist exactly, and e-mail can only target Calibre-configured recipients with formats already enabled for that recipient.
 

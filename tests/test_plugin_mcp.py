@@ -58,10 +58,18 @@ class PluginMCPTests(unittest.TestCase):
         self.assertEqual(initialized["result"]["capabilities"], {"tools": {"listChanged": False}})
 
         _, listed = self.post(base, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
-        names = [tool["name"] for tool in listed["result"]["tools"]]
-        self.assertIn("capabilities_readonly", names)
-        self.assertIn("search_books_readonly", names)
-        self.assertNotIn("move_book_destructive", names)
+        tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
+        self.assertIn("capabilities_readonly", tools)
+        self.assertIn("search_books_readonly", tools)
+        self.assertNotIn("move_book_destructive", tools)
+        for tool in tools.values():
+            if "outputSchema" in tool:
+                self.assertEqual(tool["outputSchema"]["type"], "object")
+        for tool_name in ("search_books_readonly", "find_duplicates_readonly", "list_bridge_jobs_readonly"):
+            output_schema = tools[tool_name]["outputSchema"]
+            self.assertEqual(output_schema["type"], "object")
+            self.assertEqual(output_schema["required"], ["items"])
+            self.assertEqual(output_schema["properties"]["items"]["type"], "array")
 
     def test_calls_live_plugin_tool_through_umcp(self):
         base = self.start_server()
@@ -74,7 +82,8 @@ class PluginMCPTests(unittest.TestCase):
                 "params": {"name": "search_books_readonly", "arguments": {"query": "Example", "limit": 1}},
             },
         )
-        self.assertEqual(called["result"]["structuredContent"][0]["id"], 1)
+        self.assertEqual(called["result"]["structuredContent"]["items"][0]["id"], 1)
+        self.assertEqual(json.loads(called["result"]["content"][0]["text"])[0]["id"], 1)
 
     def test_mutation_discovery_requires_ui_token_and_explicit_policy(self):
         disabled = CalibrePluginMCPServer(
@@ -106,11 +115,11 @@ class PluginMCPTests(unittest.TestCase):
         self.assertIn("changes", described["arguments"])
         self.assertEqual(described["args"], described["arguments"])
 
-    def test_mutation_discovery_fails_closed_outside_exact_calibre_9_11_0(self):
+    def test_mutation_discovery_fails_closed_outside_exact_calibre_9_12_0(self):
         calibre = types.ModuleType("calibre")
         calibre.__path__ = []
         constants = types.ModuleType("calibre.constants")
-        constants.numeric_version = (9, 11, 1)
+        constants.numeric_version = (9, 12, 1)
         with patch.dict(sys.modules, {"calibre": calibre, "calibre.constants": constants}):
             server = CalibrePluginMCPServer(
                 FakeGui(), token="ui-token", ui_token_configured=True, mutations_enabled=True

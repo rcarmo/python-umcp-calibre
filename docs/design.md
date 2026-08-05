@@ -9,13 +9,13 @@ Four files contain the Calibre-specific plugin code:
 * `plugins/calibre_umcp_plugin/ui.py` owns automatic startup, the Calibre menu actions and server lifecycle.
 * `plugins/calibre_umcp_plugin/mcp.py` defines the published MCP surface, the `/health` hook and the mutation gate.
 * `plugins/calibre_umcp_plugin/bridge.py` serialises work, jumps back to the GUI thread and wraps native Calibre jobs.
-* `plugins/calibre_umcp_plugin/__init__.py` carries Calibre's plugin metadata, including the 9.11.0 minimum version declaration.
+* `plugins/calibre_umcp_plugin/__init__.py` carries Calibre's plugin metadata, including the 9.12.0 minimum version declaration.
 
 The build copies `src/calibre_umcp/umcp.py` and `src/calibre_umcp/umcp_shared.py` into the plugin ZIP. Those copied files are packaging inputs, not a second source tree.
 
 ## Read-Only First, Mutations Behind A Gate
 
-The published MCP surface stays read-only until Calibre 9.11.0, a UI-saved token, explicit UI mutation enablement, and the active process token all line up. That extra friction is deliberate. An environment-only token can require bearer authentication, but it cannot enable mutations by itself, and a mismatched override token disables mutation discovery rather than trying to be clever.
+The published MCP surface stays read-only until Calibre 9.12.0, a UI-saved token, explicit UI mutation enablement, and the active process token all line up. That extra friction is deliberate. An environment-only token can require bearer authentication, but it cannot enable mutations by itself, and a mismatched override token disables mutation discovery rather than trying to be clever.
 
 Read-only discovery is small on purpose: status, active-library listing, bounded search, single-book metadata, duplicate detection, authenticated content-server status, and bridge job records. Mutation discovery adds metadata, format, cover, import, conversion, export, copy/move, configured-recipient e-mail, trash deletion, duplicate merge and job-cancellation tools.
 

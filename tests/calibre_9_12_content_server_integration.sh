@@ -1,7 +1,7 @@
 #!/bin/sh
-# Run against an unpacked Calibre 9.11.0 bundle.
+# Run against an unpacked Calibre 9.12.0 bundle.
 set -eu
-: "${CALIBRE_RUNTIME_ROOT:?Set CALIBRE_RUNTIME_ROOT to Calibre 9.11.0}"
+: "${CALIBRE_RUNTIME_ROOT:?Set CALIBRE_RUNTIME_ROOT to Calibre 9.12.0}"
 ROOT="$(mktemp -d -t calibre-umcp-content-XXXXXX)"
 PID=
 cleanup() {
@@ -38,4 +38,4 @@ AUTH="$(curl -sS -u reader:test-password -o "$ROOT/auth.body" -w '%{http_code}' 
 [ "$ANON" = 401 ]
 [ "$AUTH" = 200 ]
 ! grep -q "$ROOT/library" "$ROOT/auth.body"
-printf '{"calibre_content_server":"9.11.0","anonymous_status":%s,"authenticated_status":%s,"raw_filesystem_path_exposed":false}\n' "$ANON" "$AUTH"
+printf '{"calibre_content_server":"9.12.0","anonymous_status":%s,"authenticated_status":%s,"raw_filesystem_path_exposed":false}\n' "$ANON" "$AUTH"

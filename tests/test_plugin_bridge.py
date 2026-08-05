@@ -411,11 +411,11 @@ class CalibreRpcBridgeTests(unittest.TestCase):
             bridge.call_serialized("ping", {})
         self.assertEqual(caught.exception.code, "BRIDGE_SHUTTING_DOWN")
 
-    def test_mutations_fail_closed_outside_exact_calibre_9_11_0(self):
+    def test_mutations_fail_closed_outside_exact_calibre_9_12_0(self):
         calibre = types.ModuleType("calibre")
         calibre.__path__ = []
         constants = types.ModuleType("calibre.constants")
-        constants.numeric_version = (9, 11, 1)
+        constants.numeric_version = (9, 12, 1)
         with patch.dict(sys.modules, {"calibre": calibre, "calibre.constants": constants}):
             with self.assertRaises(BridgeMethodError) as caught:
                 CalibreRpcBridge(FakeGui())._new_api()

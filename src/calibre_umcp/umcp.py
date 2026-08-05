@@ -227,6 +227,21 @@ class MCPServer:
             "additionalProperties": False,
         }
 
+    @staticmethod
+    def _is_root_array_output_schema(schema: dict[str, Any] | None) -> bool:
+        return isinstance(schema, dict) and schema.get("type") == "array"
+
+    def _publish_tool_output_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
+        published = dict(schema)
+        if not self._is_root_array_output_schema(published):
+            return published
+        return {
+            "type": "object",
+            "properties": {"items": published},
+            "required": ["items"],
+            "additionalProperties": False,
+        }
+
     def _sort_discovery_items(self, items: list[dict[str, Any]], *keys: str) -> list[dict[str, Any]]:
         return sorted(items, key=lambda item: tuple(str(item.get(key, "")) for key in keys))
 
@@ -301,13 +316,17 @@ class MCPServer:
             }
             output_schema = self._tool_output_schema(method)
             if output_schema is not None:
-                tool_def["outputSchema"] = output_schema
+                tool_def["outputSchema"] = self._publish_tool_output_schema(output_schema)
             annotations = self._infer_tool_annotations(tool_name, method)
             if annotations:
                 tool_def["annotations"] = annotations
             tools_by_name[tool_name] = tool_def
         for tool_name, (meta, _callable) in self._dynamic_tools.items():
-            tools_by_name[tool_name] = dict(meta)
+            tool_def = dict(meta)
+            raw_output_schema = tool_def.get("outputSchema")
+            if isinstance(raw_output_schema, dict):
+                tool_def["outputSchema"] = self._publish_tool_output_schema(raw_output_schema)
+            tools_by_name[tool_name] = tool_def
         return {"tools": self._sort_discovery_items(list(tools_by_name.values()), "name")}
 
     def register_tool(
@@ -1509,6 +1528,9 @@ class MCPServer:
         if output_schema is not None:
             candidate = structured if structured is not _STRUCTURED_UNSET else content
             self._validate_schema_subset(candidate, output_schema)
+        public_structured = structured
+        if self._is_root_array_output_schema(output_schema) and isinstance(structured, list):
+            public_structured = {"items": structured}
         if isinstance(content, str):
             stringified_content = content
         else:
@@ -1522,8 +1544,8 @@ class MCPServer:
                 "text": stringified_content
             }]
         }
-        if structured is not _STRUCTURED_UNSET and (isinstance(structured, dict) or (output_schema is not None and not isinstance(content, str))):
-            result["structuredContent"] = structured
+        if public_structured is not _STRUCTURED_UNSET and (isinstance(public_structured, dict) or (output_schema is not None and not isinstance(content, str))):
+            result["structuredContent"] = public_structured
         return result
 
     def _coerce_value(self, value: Any, param_type: Any) -> Any:

@@ -41,7 +41,7 @@ class CalibreSourceContractTests(unittest.TestCase):
                 }
         raise AssertionError(f"Expected class {class_name!r} in {relative_path}")
 
-    def test_cache_mutation_signatures_match_calibre_9_11_adapter(self):
+    def test_cache_mutation_signatures_match_calibre_9_12_adapter(self):
         methods = self.class_methods("calibre/db/cache.py", "Cache")
         expected_prefixes = {
             "pref": ["self", "name", "default", "namespace", "get_default_from_defaults"],
@@ -67,7 +67,7 @@ class CalibreSourceContractTests(unittest.TestCase):
             self.assertIn(name, methods)
             self.assertEqual(methods[name][: len(prefix)], prefix)
 
-    def test_conversion_contracts_match_calibre_9_11_mapping(self):
+    def test_conversion_contracts_match_calibre_9_12_mapping(self):
         tool_functions = self.top_level_functions("calibre/gui2/tools.py")
         self.assertEqual(
             tool_functions["convert_single_ebook"][:6],
@@ -77,7 +77,7 @@ class CalibreSourceContractTests(unittest.TestCase):
         customise_functions = self.top_level_functions("calibre/customize/ui.py")
         self.assertEqual(customise_functions["run_plugins_on_postconvert"][:3], ["db", "book_id", "fmt"])
 
-    def test_job_and_copy_contracts_match_calibre_9_11_mapping(self):
+    def test_job_and_copy_contracts_match_calibre_9_12_mapping(self):
         job_methods = self.class_methods("calibre/gui2/jobs.py", "JobManager")
         self.assertEqual(job_methods["run_job"][:3], ["self", "done", "name"])
         self.assertEqual(job_methods["run_threaded_job"][:2], ["self", "job"])
@@ -109,7 +109,7 @@ class CalibreSourceContractTests(unittest.TestCase):
         )
         self.assertEqual(worker_methods["do_one"][:4], ["self", "num", "book_id", "newdb"])
 
-    def test_save_to_disk_contracts_match_calibre_9_11_mapping(self):
+    def test_save_to_disk_contracts_match_calibre_9_12_mapping(self):
         legacy_methods = self.class_methods("calibre/db/legacy.py", "LibraryDatabase")
         self.assertEqual(
             legacy_methods["get_metadata"][:6],
@@ -134,7 +134,7 @@ class CalibreSourceContractTests(unittest.TestCase):
         self.assertEqual(saver_methods["write_fmt"][:4], ["self", "book_id", "fmt", "base_path"])
         self.assertEqual(saver_methods["break_cycles"][:1], ["self"])
 
-    def test_email_contracts_match_calibre_9_11_mapping(self):
+    def test_email_contracts_match_calibre_9_12_mapping(self):
         smtp_functions = self.top_level_functions("calibre/utils/smtp.py")
         self.assertEqual(smtp_functions["config"][:1], ["defaults"])
 
@@ -166,7 +166,7 @@ class CalibreSourceContractTests(unittest.TestCase):
         )
         self.assertEqual(email_mixin_methods["email_sent"][:3], ["self", "job", "remove"])
 
-    def test_threaded_job_content_server_and_device_contracts_match_calibre_9_11_mapping(self):
+    def test_threaded_job_content_server_and_device_contracts_match_calibre_9_12_mapping(self):
         threaded_job_methods = self.class_methods("calibre/gui2/threaded_jobs.py", "ThreadedJob")
         self.assertEqual(
             threaded_job_methods["__init__"][:10],
