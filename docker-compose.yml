@@ -1,3 +1,4 @@
+# Compose wiring for the legacy read-only compatibility server built by Dockerfile.
 services:
   calibre-umcp:
     build: .

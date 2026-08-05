@@ -122,7 +122,7 @@ Format collision rules are therefore strict and easy to miss: destination format
 
 `merge_book_metadata()` is conservative. It appends differing comments, fills title/authors/publisher/rating/series/pubdate only when the destination lacks a value, extends tags and multi-text custom columns, preserves destination-or-earlier identifier values on key collision, and only replaces the destination cover when the destination had none or `replace_cover=True` was requested. When `save_alternate_cover=True`, alternate covers are stored as numbered files under the book's `data/` directory.
 
-There is no source-level coordination with Calibre's active jobs list here. `merge_books()` runs synchronously on the GUI thread, does not create a `JobManager` entry and does not check for in-flight conversion, e-mail, save-to-disk, copy or device jobs touching the same records. The bridge should refuse or defer merge requests when any active job references the source or destination IDs.
+There is no source-level coordination with Calibre's active jobs list here. `merge_books()` runs synchronously on the GUI thread, does not create a `JobManager` entry and does not check for in-flight conversion, e-mail, save-to-disk, copy or device jobs touching the same records. The current bridge implementation therefore refuses merge requests when one of its own tracked bridge jobs still references the survivor or source IDs, rather than claiming wider visibility it does not yet have.
 
 The first bridge policy should name the survivor explicitly, add only missing formats, merge metadata conservatively and leave source records in place unless deletion is separately confirmed.
 
@@ -163,13 +163,13 @@ The plugin allows only recipients already configured in Calibre and requires an 
 
 Authentication is configured elsewhere, not by these GUI entry points. The server preferences expose an `auth` flag plus per-user accounts and library restrictions. In lower-level server code, `calibre.srv.auth.AuthController` implements Basic/Digest auth and one scoped-expiry mechanism for authenticated downloads: an Android-workaround cookie whose path is pinned to the requested endpoint and whose default lifetime is `MAX_AGE_SECONDS = 3600`. This is the only scoped-expiry facility found in the 9.11 GUI/server path audit, and it is an authenticated session cookie rather than a shareable temporary public link.
 
-There is still no scoped temporary-link facility in the GUI entry points for arbitrary files or books. The bridge may report an existing authenticated content-server URL after validating server state and policy, but it must not invent an unauthenticated filesystem URL. Temporary public links remain unsupported unless a lower-level Calibre API with explicit link expiry and scope is identified.
+There is still no scoped temporary-link facility in the GUI entry points for arbitrary files or books. The bridge may report an existing authenticated content-server URL only when the server is already running on a concrete non-wildcard host, and it must not invent an unauthenticated filesystem URL. Temporary public links remain unsupported unless a lower-level Calibre API with explicit link expiry and scope is identified.
 
 ## Configuration
 
 Calibre plugins commonly use `calibre.utils.config.JSONConfig`. Calibre 9.11 has no general OS credential-store abstraction in its source tree, and its own e-mail settings use Calibre configuration. The bridge token can therefore be stored in a plugin JSON file with Calibre-profile permissions and edited through a masked UI field; documentation must state that it is not hardware-backed secret storage.
 
-Environment variables may override host, port and token for container deployment. They can require authentication, but mutation discovery requires the token to have been explicitly saved in the plugin UI plus the UI mutation switch.
+Environment variables may override host, port and token for container deployment. They can require authentication, but mutation discovery still requires the token to have been explicitly saved in the plugin UI plus the UI mutation switch. An environment-only token cannot enable mutations on its own, and a different override token disables mutation discovery rather than widening it.
 
 ## Cancellation Boundaries
 
@@ -182,6 +182,8 @@ Import cancellation prevents the GUI-thread `add_books()` callback and removes a
 The mutation catalogue shipped by this release comprises metadata and format updates, cover replace/remove, confined add-book import, native conversion, confined save-to-disk, configured-recipient e-mail, verified copy/move, conservative duplicate merge, Calibre-trash deletion and native-job cancellation. Singular `copy_book` and `move_book` remain rejected legacy bridge methods; clients use the plural verified operations.
 
 Permanent deletion, arbitrary recipients, implicit e-mail conversion, temporary public links and device/connected-folder actions are intentionally unsupported. The authenticated content-server status call exposes only a concrete running authenticated base URL and never a raw library path.
+
+The source-tree compatibility server under `src/calibre_umcp/server.py` stays read-only by default and keeps its legacy mutator names as explicit failures. When it is pointed at `CALIBRE_UMCP_BRIDGE_URL`, that optional proxy path still speaks the older `/rpc` JSON-RPC helper rather than the released plugin `/mcp` transport.
 
 `CalibreUmcpPlugin.minimum_calibre_version` is `(9, 11, 0)` because no older release has passed this source/runtime contract. Since Calibre interprets that field as a lower bound, later releases may load the read-only plugin surface, but mutation discovery and execution both require exactly `(9, 11, 0)` and fail closed otherwise.
 

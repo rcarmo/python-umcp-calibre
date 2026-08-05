@@ -1,38 +1,56 @@
 # Design
 
-## One MCP Runtime
+## One Released MCP Path
 
-The plugin subclasses `umcp.MCPServer` and exposes MCP directly from the Calibre process. This avoids both a sidecar and a smaller, subtly different protocol implementation--the sort of duplication that behaves perfectly until a client sends a notification or negotiates another protocol version.
+The plugin subclasses `umcp.MCPServer` and exposes MCP directly from the Calibre process. That avoids a separate writer around `metadata.db`, and it also avoids the more subtle problem of maintaining two protocol stacks that look identical until a client negotiates another transport detail or sends a notification you forgot to mirror.
 
-Four files contain the Calibre-specific code:
+Four files contain the Calibre-specific plugin code:
 
-* `plugins/calibre_umcp_plugin/ui.py` owns automatic startup, the Calibre actions and server lifecycle.
-* `plugins/calibre_umcp_plugin/mcp.py` defines the MCP server, authentication hook and tools.
-* `plugins/calibre_umcp_plugin/bridge.py` serialises access to `gui.current_db`.
-* `plugins/calibre_umcp_plugin/__init__.py` provides Calibre's plugin metadata.
+* `plugins/calibre_umcp_plugin/ui.py` owns automatic startup, the Calibre menu actions and server lifecycle.
+* `plugins/calibre_umcp_plugin/mcp.py` defines the published MCP surface, the `/health` hook and the mutation gate.
+* `plugins/calibre_umcp_plugin/bridge.py` serialises work, jumps back to the GUI thread and wraps native Calibre jobs.
+* `plugins/calibre_umcp_plugin/__init__.py` carries Calibre's plugin metadata, including the 9.11.0 minimum version declaration.
 
-The build copies `src/calibre_umcp/umcp.py` and `src/calibre_umcp/umcp_shared.py` into the plugin ZIP. Those copies are temporary packaging inputs, not another source tree.
+The build copies `src/calibre_umcp/umcp.py` and `src/calibre_umcp/umcp_shared.py` into the plugin ZIP. Those copied files are packaging inputs, not a second source tree.
 
-## A Narrow Tool Surface
+## Read-Only First, Mutations Behind A Gate
 
-The default MCP surface is read-only: progressive discovery, server status, active-library listing, book search, metadata lookup, duplicate detection, authenticated content-server status and audit records.
+The published MCP surface stays read-only until Calibre 9.11.0, a UI-saved token, explicit UI mutation enablement, and the active process token all line up. That extra friction is deliberate. An environment-only token can require bearer authentication, but it cannot enable mutations by itself, and a mismatched override token disables mutation discovery rather than trying to be clever.
 
-Mutation discovery has a second gate owned by the Calibre UI. A saved UI token plus explicit enablement exposes metadata, format, cover, import, conversion, export, copy/move, configured-recipient e-mail, trash deletion and conservative duplicate-merge tools. Paths and destination libraries come from UI allowlists rather than request-time host access.
+Read-only discovery is small on purpose: status, active-library listing, bounded search, single-book metadata, duplicate detection, authenticated content-server status, and bridge job records. Mutation discovery adds metadata, format, cover, import, conversion, export, copy/move, configured-recipient e-mail, trash deletion, duplicate merge and job-cancellation tools.
 
-Long work uses Calibre's job machinery. Conversion maps to a `ParallelJob`; import, export, copy/move and e-mail map to `ThreadedJob`. The bridge records its own stable ID alongside Calibre's job ID, then mirrors progress, cancellation and terminal errors without modifying Calibre job objects.
+The exact tool names and parameters live in the root `README.md`, because that is the page most people will copy from.
 
-Permanent deletion, arbitrary e-mail recipients, automatic e-mail conversion, temporary public links and device actions fail closed. Those operations either need a stronger policy boundary or depend on live device/server state that Calibre 9.11 does not expose as a safe scoped primitive.
+## Paths, Libraries And Recipients Come From Policy
 
-## Authentication And Binding
+The bridge never treats the client as a general-purpose filesystem or routing authority.
 
-Loopback use may omit a token. Binding to `0.0.0.0`, a LAN address or a container-facing interface requires `CALIBRE_UMCP_BRIDGE_TOKEN`; µMCP's authentication hook then checks `Authorization: Bearer <token>` for `/mcp`.
+* Import paths, replacement formats and cover files must sit under UI-configured import roots.
+* Save-to-disk exports and conversion exports must stay under UI-configured export roots.
+* Cross-library copy and move destinations must match the UI allowlist exactly and must resolve to a real `metadata.db`.
+* E-mail can only use recipients already configured in Calibre, and only the formats enabled for that recipient.
 
-`GET /health` is intentionally small and unauthenticated. It returns status and plugin version, not library contents.
+That keeps the request surface narrow enough to audit without pretending the bridge is a security boundary Calibre never claimed to be.
 
-## Shutdown Without Debris
+## Jobs That Tell The Truth
 
-The synchronous µMCP transport accepts a `server_ready` callback that hands its `ThreadingHTTPServer` to the plugin after binding. The Calibre action can therefore call `shutdown()`, `server_close()` and join the daemon thread instead of abandoning it during plugin reload or application shutdown.
+Short database changes run synchronously on the GUI thread, because that is the only thread where Calibre can safely mutate its live state. Long work is handed back to Calibre's own job machinery: conversion uses the JobManager worker path, while import, copy/move, save-to-disk and e-mail use `ThreadedJob`.
+
+The bridge keeps its own stable job IDs alongside Calibre's native ones. That lets it expose one consistent audit trail and say what actually happened when cancellation arrives at an awkward moment: copy can stop between books, move can finish destination verification and still retain the source, save-to-disk can cancel before publication, and SMTP submission can succeed before a cancellation request takes effect.
+
+## Content URLs Stay Narrow
+
+`content_server_status_readonly()` reports only a concrete authenticated base URL from an already-running Calibre content server. Wildcard binds, disabled auth and temporary public links are all treated as out of scope. The bridge is reporting an existing service, not inventing a sharing layer.
+
+## Compatibility Code Still In The Tree
+
+The source tree still contains two older compatibility paths:
+
+* `src/calibre_umcp/server.py` is a read-only compatibility server for older deployments and tests. It runs over stdio by default and can serve MCP at `/mcp` when started with `--http`.
+* `plugins/calibre_umcp_plugin/bridge.py` still contains `serve_bridge()`, a lower-level JSON-RPC helper at `/rpc` used by tests and older wiring.
+
+Neither of those is the released mutation surface, and the legacy mutator names they expose stay as explicit failures.
 
 ## Packaging Paths
 
-`plugins/build-plugin.sh` builds from the local source tree. `plugins/install-from-gitea.sh` can fetch the same seven files from a remote source and assemble the ZIP inside a Calibre container, where a full checkout is unnecessary.
+`plugins/build-plugin.sh` builds from the local checkout and produces `plugins/calibre-umcp-plugin.zip`. `plugins/install-from-gitea.sh` fetches the same seven files from a remote source, assembles a ZIP inside a Calibre container, and then installs it. Despite the script name, its default `SOURCE_BASE` points at the repository's raw GitHub URL unless you override it.

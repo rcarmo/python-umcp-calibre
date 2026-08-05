@@ -1,4 +1,6 @@
 #!/bin/sh
+# Build and install the in-Calibre plugin ZIP from raw source files. Despite the
+# script name, SOURCE_BASE defaults to the repository's raw GitHub URL unless overridden.
 set -eu
 
 SOURCE_BASE=${SOURCE_BASE:-https://raw.githubusercontent.com/rcarmo/python-umcp-calibre/main}

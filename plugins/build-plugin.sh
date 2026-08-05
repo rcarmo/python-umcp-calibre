@@ -1,4 +1,6 @@
 #!/bin/sh
+# Build the in-Calibre plugin ZIP from the local checkout. The shared µMCP
+# runtime is copied in temporarily from src/ during packaging and removed on exit.
 set -eu
 cd "$(dirname "$0")"
 rm -f calibre-umcp-plugin.zip

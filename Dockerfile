@@ -1,3 +1,5 @@
+# Compatibility image for the legacy read-only server, not the in-Calibre plugin
+# mutation surface documented in the README.
 FROM python:3.12-slim
 
 RUN apt-get update \
