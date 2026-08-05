@@ -12,7 +12,9 @@ import shutil
 import threading
 import time
 import uuid
-from datetime import datetime
+import zipfile
+from datetime import datetime, timezone
+from xml.etree import ElementTree
 from functools import partial
 from ipaddress import ip_address
 from pathlib import Path
@@ -28,7 +30,7 @@ from urllib.parse import urlparse
 
 BRIDGE_VERSION = PLUGIN_VERSION_STRING
 SCHEMA_VERSION = 2
-TOOLSET_VERSION = 2
+TOOLSET_VERSION = 3
 SUPPORTED_CALIBRE_MUTATION_VERSION = (9, 12, 0)
 
 
@@ -48,6 +50,12 @@ STABLE_READ_ERRORS = frozenset({
     "CURSOR_INVALID",
     "CROSS_LIBRARY_SAME_LIBRARY",
     "CROSS_LIBRARY_TARGETS_REQUIRED",
+    "FORMAT_NOT_FOUND",
+    "FORMAT_READ_FAILED",
+    "FORMAT_UNSUPPORTED",
+    "INSPECTION_LIMIT_EXCEEDED",
+    "INSPECTION_TIMEOUT",
+    "JOB_NOT_FOUND",
     "LIBRARY_ALIAS_UNKNOWN",
     "LIBRARY_IDENTITY_MISMATCH",
     "LIBRARY_READ_DENIED",
@@ -55,6 +63,7 @@ STABLE_READ_ERRORS = frozenset({
     "LIBRARY_SWITCH_DENIED",
     "LIBRARY_SWITCH_REQUIRED",
     "LIBRARY_UNAVAILABLE",
+    "POLICY_DENIED",
 })
 
 
@@ -216,6 +225,14 @@ class CalibreRpcBridge:
         if method == "get_book_metadata":
             db, alias = self._resolve_library(params.get("library"))
             return self._metadata(db, int(params["book_id"]), alias)
+        if method == "get_book_formats":
+            return self._get_book_formats(params)
+        if method == "inspect_book_format":
+            return self._inspect_book_format(params)
+        if method == "assess_book_quality":
+            return self._assess_book_quality(params)
+        if method == "compare_book_quality":
+            return self._compare_book_quality(params)
         if method == "find_duplicates":
             return self._find_duplicates(params)
         if method == "find_cross_library_duplicates":
@@ -414,6 +431,348 @@ class CalibreRpcBridge:
             "library": library or self._active_alias(),
         }
 
+    @staticmethod
+    def _format_path(db, book_id: int, fmt: str) -> Path:
+        try:
+            db.get_metadata(book_id, index_is_id=True)
+        except Exception as exc:
+            raise BridgeMethodError("BOOK_NOT_FOUND", "The requested book does not exist in the selected library") from exc
+        getter = getattr(db, "format_abspath", None)
+        if not callable(getter):
+            raise BridgeMethodError("FORMAT_READ_FAILED", "Calibre cannot provide the requested format")
+        try:
+            path_value = getter(book_id, fmt, index_is_id=True)
+            path = Path(str(path_value or ""))
+            if not path.is_file():
+                raise FileNotFoundError
+            return path
+        except BridgeMethodError:
+            raise
+        except FileNotFoundError as exc:
+            raise BridgeMethodError("FORMAT_NOT_FOUND", "The requested format is unavailable") from exc
+        except Exception as exc:
+            raise BridgeMethodError("FORMAT_READ_FAILED", "Calibre could not read the requested format") from exc
+
+    def _get_book_formats(self, params: dict[str, Any]) -> dict[str, Any]:
+        db, alias = self._resolve_library(params.get("library"))
+        book_id = int(params["book_id"])
+        metadata = self._metadata(db, book_id, alias)
+        formats = []
+        for fmt in sorted(metadata["formats"]):
+            try:
+                path = self._format_path(db, book_id, fmt)
+                stat = path.stat()
+                formats.append({
+                    "format": fmt.upper(),
+                    "size_bytes": stat.st_size,
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "available": True,
+                })
+            except BridgeMethodError as exc:
+                formats.append({"format": fmt.upper(), "size_bytes": None, "modified_at": None, "available": False, "reason_code": exc.code})
+        return {"schema_version": SCHEMA_VERSION, "library": alias, "book_id": book_id, "formats": formats}
+
+    @staticmethod
+    def _zip_read_bounded(archive: zipfile.ZipFile, name: str, maximum: int) -> bytes:
+        try:
+            info = archive.getinfo(name)
+            if info.file_size > maximum:
+                raise BridgeMethodError("INSPECTION_LIMIT_EXCEEDED", "An EPUB component exceeds the inspection limit")
+            with archive.open(info) as stream:
+                data = stream.read(maximum + 1)
+        except BridgeMethodError:
+            raise
+        except Exception as exc:
+            raise BridgeMethodError("FORMAT_READ_FAILED", "An EPUB component could not be read") from exc
+        if len(data) > maximum:
+            raise BridgeMethodError("INSPECTION_LIMIT_EXCEEDED", "An EPUB component exceeds the inspection limit")
+        return data
+
+    @staticmethod
+    def _xml_root(data: bytes, failure_code: str = "FORMAT_READ_FAILED"):
+        if b"<!DOCTYPE" in data.upper() or b"<!ENTITY" in data.upper():
+            raise BridgeMethodError("FORMAT_READ_FAILED", "Unsafe XML declarations are not inspected")
+        try:
+            return ElementTree.fromstring(data)
+        except ElementTree.ParseError as exc:
+            raise BridgeMethodError(failure_code, "EPUB XML is invalid") from exc
+
+    @staticmethod
+    def _local_name(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1]
+
+    @staticmethod
+    def _embedded_identifier_kind(value: str) -> str:
+        lowered = value.casefold()
+        compact = re.sub(r"[^0-9x]", "", lowered)
+        if "isbn" in lowered or len(compact) in {10, 13}:
+            return "isbn"
+        if lowered.startswith("urn:uuid:"):
+            return "uuid"
+        return ""
+
+    def _inspect_epub(self, path: Path, record: dict[str, Any], started: float) -> dict[str, Any]:
+        if path.stat().st_size > 64 * 1024 * 1024:
+            raise BridgeMethodError("INSPECTION_LIMIT_EXCEEDED", "The format exceeds the 64 MiB inspection limit")
+        warnings = []
+        try:
+            archive = zipfile.ZipFile(path)
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise BridgeMethodError("FORMAT_READ_FAILED", "The EPUB container could not be opened") from exc
+        with archive:
+            infos = archive.infolist()
+            if len(infos) > 4096 or sum(info.file_size for info in infos) > 256 * 1024 * 1024:
+                raise BridgeMethodError("INSPECTION_LIMIT_EXCEEDED", "The EPUB archive exceeds inspection limits")
+            names = set(archive.namelist())
+            valid_mimetype = "mimetype" in names and self._zip_read_bounded(archive, "mimetype", 128).strip() == b"application/epub+zip"
+            if not valid_mimetype:
+                warnings.append("epub_mimetype_invalid")
+            container = self._xml_root(self._zip_read_bounded(archive, "META-INF/container.xml", 256 * 1024))
+            rootfile = next((element.attrib.get("full-path") for element in container.iter() if self._local_name(element.tag) == "rootfile"), None)
+            if not rootfile or rootfile not in names:
+                raise BridgeMethodError("FORMAT_READ_FAILED", "The EPUB package document is unavailable")
+            package = self._xml_root(self._zip_read_bounded(archive, rootfile, 2 * 1024 * 1024))
+            manifest = {}
+            spine_ids = []
+            package_title = ""
+            package_authors = []
+            identifiers = []
+            cover_id = None
+            for element in package.iter():
+                local = self._local_name(element.tag)
+                if local == "item":
+                    manifest[element.attrib.get("id", "")] = element.attrib
+                elif local == "itemref":
+                    spine_ids.append(element.attrib.get("idref", ""))
+                elif local == "title" and not package_title:
+                    package_title = "".join(element.itertext()).strip()
+                elif local == "creator":
+                    value = "".join(element.itertext()).strip()
+                    if value:
+                        package_authors.append(value)
+                elif local == "identifier":
+                    value = "".join(element.itertext()).strip()
+                    if value:
+                        identifiers.append(value)
+                elif local == "meta" and element.attrib.get("name", "").lower() == "cover":
+                    cover_id = element.attrib.get("content")
+            cover_item = manifest.get(cover_id or "", {})
+            has_cover = bool(cover_item) or any("cover-image" in item.get("properties", "").split() for item in manifest.values())
+            nav_items = [item for item in manifest.values() if "nav" in item.get("properties", "").split()]
+            ncx_items = [item for item in manifest.values() if item.get("media-type") == "application/x-dtbncx+xml"]
+            toc_entries = 0
+            package_dir = str(Path(rootfile).parent)
+            for item in (nav_items or ncx_items)[:1]:
+                member = str(Path(package_dir, item.get("href", ""))) if package_dir != "." else item.get("href", "")
+                if member in names:
+                    toc_root = self._xml_root(self._zip_read_bounded(archive, member, 2 * 1024 * 1024))
+                    target_name = "a" if nav_items else "navPoint"
+                    toc_entries = sum(1 for element in toc_root.iter() if self._local_name(element.tag) == target_name)
+            estimated_chars = 0
+            text_budget = 8 * 1024 * 1024
+            text_parts = []
+            for item_id in spine_ids[:256]:
+                if time.monotonic() - started > 5:
+                    raise BridgeMethodError("INSPECTION_TIMEOUT", "EPUB inspection exceeded five seconds")
+                item = manifest.get(item_id, {})
+                member = str(Path(package_dir, item.get("href", ""))) if package_dir != "." else item.get("href", "")
+                if member not in names:
+                    continue
+                remaining = text_budget - sum(len(part) for part in text_parts)
+                if remaining <= 0:
+                    warnings.append("content_scan_truncated")
+                    break
+                data = self._zip_read_bounded(archive, member, min(2 * 1024 * 1024, remaining))
+                text_parts.append(data)
+                decoded = data.decode("utf-8", "replace")
+                estimated_chars += len(re.sub(r"<[^>]+>", " ", decoded))
+            combined = b"".join(text_parts).decode("utf-8", "replace")
+            replacement_ratio = combined.count("\ufffd") / max(1, len(combined))
+            control_ratio = sum(ord(char) < 32 and char not in "\n\r\t" for char in combined) / max(1, len(combined))
+            garbage_score = round(min(1.0, replacement_ratio * 10 + control_ratio * 20), 4)
+            normalise = lambda value: re.sub(r"\W+", "", str(value or "").casefold())
+            title_match = bool(package_title and normalise(package_title) == normalise(record.get("title")))
+            record_authors = {normalise(author) for author in record.get("authors", [])}
+            author_match = bool(record_authors and record_authors.intersection(normalise(author) for author in package_authors))
+            metadata_match = "full" if title_match and author_match else "partial" if title_match or author_match else "mismatch"
+            return {
+                "container": {"valid": valid_mimetype, "warnings": sorted(warnings)},
+                "metadata": {
+                    "title_present": bool(package_title),
+                    "authors_present": bool(package_authors),
+                    "identifiers_present": sorted({
+                    kind for value in identifiers if (kind := self._embedded_identifier_kind(value))
+                }),
+                    "record_metadata_match": metadata_match,
+                },
+                "structure": {
+                    "has_cover": has_cover,
+                    "has_toc": toc_entries > 0,
+                    "toc_entries": toc_entries,
+                    "spine_items": len(spine_ids),
+                    "image_count": sum(item.get("media-type", "").startswith("image/") for item in manifest.values()),
+                    "stylesheet_count": sum(item.get("media-type") == "text/css" for item in manifest.values()),
+                },
+                "content_signals": {
+                    "estimated_text_chars": estimated_chars,
+                    "suspiciously_short": estimated_chars < 5000,
+                    "encoding_warnings": ["replacement_characters"] if replacement_ratio > 0.001 else [],
+                    "ocr_garbage_score": garbage_score,
+                },
+            }
+
+    def _inspect_book_format(self, params: dict[str, Any]) -> dict[str, Any]:
+        if bool(params.get("include_text_sample", False)):
+            raise BridgeMethodError("POLICY_DENIED", "Text samples are disabled by the current read-only inspection policy")
+        db, alias = self._resolve_library(params.get("library"))
+        book_id = int(params["book_id"])
+        fmt = str(params.get("format") or "").strip().upper()
+        if fmt != "EPUB":
+            raise BridgeMethodError("FORMAT_UNSUPPORTED", "Only bounded EPUB inspection is supported")
+        record = self._metadata(db, book_id, alias)
+        path = self._format_path(db, book_id, fmt)
+        started = time.monotonic()
+        result_queue: queue.Queue = queue.Queue(maxsize=1)
+
+        def inspect_file() -> None:
+            try:
+                result_queue.put((True, self._inspect_epub(path, record, started)))
+            except Exception as exc:
+                result_queue.put((False, exc))
+
+        inspector = threading.Thread(target=inspect_file, name="calibre-umcp-epub-inspector", daemon=True)
+        inspector.start()
+        try:
+            ok, result = result_queue.get(timeout=5.5)
+        except queue.Empty as exc:
+            raise BridgeMethodError("INSPECTION_TIMEOUT", "EPUB inspection exceeded five seconds") from exc
+        if not ok:
+            if isinstance(result, BridgeMethodError):
+                raise result
+            raise BridgeMethodError("FORMAT_READ_FAILED", "The EPUB format could not be inspected") from result
+        inspection = result
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "library": alias,
+            "book_id": book_id,
+            "format": fmt,
+            **inspection,
+            "limits": {
+                "max_file_bytes": 64 * 1024 * 1024,
+                "max_archive_entries": 4096,
+                "max_uncompressed_bytes": 256 * 1024 * 1024,
+                "timeout_seconds": 5,
+                "truncated": "content_scan_truncated" in inspection["container"]["warnings"],
+                "text_sample_included": False,
+            },
+        }
+
+    @staticmethod
+    def _generic_title(title: str) -> bool:
+        compact = re.sub(r"[^a-z0-9]", "", str(title or "").casefold())
+        return not compact or compact in {"unknown", "untitled", "ebook", "book"} or bool(re.fullmatch(r"(?:b0)?[a-z0-9]{8,16}", compact))
+
+    def _assess_book_quality(self, params: dict[str, Any]) -> dict[str, Any]:
+        db, alias = self._resolve_library(params.get("library"))
+        book_id = int(params["book_id"])
+        record = self._metadata(db, book_id, alias)
+        requested = params.get("formats")
+        available = sorted(str(fmt).upper() for fmt in record["formats"])
+        selected = available if requested is None else [str(fmt).strip().upper() for fmt in requested]
+        if not selected or len(selected) > 8:
+            raise BridgeMethodError("FORMAT_NOT_FOUND", "One to eight available formats are required")
+        metadata_warnings = []
+        if not record.get("title"):
+            metadata_warnings.append("metadata_title_missing")
+        elif self._generic_title(record["title"]):
+            metadata_warnings.append("generic_import_title")
+        if not record.get("authors"):
+            metadata_warnings.append("metadata_author_missing")
+        if not record.get("publisher"):
+            metadata_warnings.append("missing_publisher")
+        format_scores = []
+        for fmt in selected:
+            if fmt not in available:
+                raise BridgeMethodError("FORMAT_NOT_FOUND", "A requested format is unavailable")
+            if fmt != "EPUB":
+                format_scores.append({"format": fmt, "score": 0, "reasons": [], "warnings": ["unsupported_format"]})
+                continue
+            inspection = self._inspect_book_format({"library": alias, "book_id": book_id, "format": fmt})
+            score = 30
+            reasons = ["format_preferred:epub"]
+            warnings = list(inspection["container"]["warnings"])
+            score += 15
+            if inspection["container"]["valid"]:
+                score += 20
+                reasons.append("container_valid")
+            else:
+                score -= 20
+                warnings.append("container_invalid")
+            if inspection["structure"]["has_cover"]:
+                score += 8
+                reasons.append("has_cover")
+            else:
+                warnings.append("missing_cover")
+            if inspection["structure"]["has_toc"]:
+                score += 10
+                reasons.append("has_toc")
+            else:
+                warnings.append("missing_toc")
+            identifiers = inspection["metadata"]["identifiers_present"]
+            if identifiers:
+                score += 7
+                reasons.extend(f"identifier:{identifier}" for identifier in identifiers)
+            else:
+                warnings.append("missing_identifiers")
+            if inspection["content_signals"]["suspiciously_short"]:
+                score -= 20
+                warnings.append("suspiciously_small_file")
+            if "generic_import_title" in metadata_warnings:
+                score -= 15
+            if "metadata_title_missing" in metadata_warnings:
+                score -= 20
+            if "metadata_author_missing" in metadata_warnings:
+                score -= 10
+            format_scores.append({"format": fmt, "score": max(0, min(100, score)), "reasons": sorted(set(reasons)), "warnings": sorted(set(warnings))})
+        best = max(format_scores, key=lambda item: (item["score"], item["format"] == "EPUB"))
+        grade = "good" if best["score"] >= 75 else "fair" if best["score"] >= 50 else "poor"
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "library": alias,
+            "book_id": book_id,
+            "score": best["score"],
+            "grade": grade,
+            "best_format": best["format"] if best["score"] > 0 else None,
+            "format_scores": format_scores,
+            "metadata_warnings": sorted(metadata_warnings),
+        }
+
+    def _compare_book_quality(self, params: dict[str, Any]) -> dict[str, Any]:
+        policy = str(params.get("policy") or "prefer_epub_then_metadata")
+        if policy != "prefer_epub_then_metadata":
+            raise BridgeMethodError("POLICY_DENIED", "The requested quality comparison policy is unsupported")
+        left_input = dict(params.get("left") or {})
+        right_input = dict(params.get("right") or {})
+        left = self._assess_book_quality(left_input)
+        right = self._assess_book_quality(right_input)
+        delta = right["score"] - left["score"]
+        keep = "right" if delta > 0 else "left" if delta < 0 else "undetermined"
+        reasons = []
+        if left["best_format"] != right["best_format"]:
+            preferred = "left" if left["best_format"] == "EPUB" else "right" if right["best_format"] == "EPUB" else None
+            if preferred:
+                reasons.append(f"{preferred}_has_preferred_format")
+        if delta:
+            reasons.append(f"{keep}_has_higher_quality_score")
+        confidence = "high" if abs(delta) >= 20 else "medium" if abs(delta) >= 8 else "low"
+        compact = lambda item: {"library": item["library"], "book_id": item["book_id"], "score": item["score"], "best_format": item["best_format"]}
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "left": compact(left),
+            "right": compact(right),
+            "recommendation": {"keep": keep, "confidence": confidence, "reasons": reasons},
+        }
+
     def _content_server_status(self) -> dict[str, Any]:
         server = getattr(self.gui, "content_server", None)
         loop = getattr(server, "loop", None)
@@ -539,15 +898,25 @@ class CalibreRpcBridge:
         limit = max(1, min(int(params.get("limit") or 100), 500))
         per_book = max(1, min(int(params.get("candidate_limit_per_book") or 20), 100))
         query = str(params.get("source_query") or "")
-        source_ids = sorted(source_db.search_getting_ids(query, None)) if query else self._all_book_ids(source_db)
-        source_ids = [int(book_id) for book_id in source_ids[:limit]]
+        all_source_ids = sorted(source_db.search_getting_ids(query, None)) if query else self._all_book_ids(source_db)
+        source_ids = [int(book_id) for book_id in all_source_ids[:limit]]
         indexes = []
+        indexed_target_count = 0
+        target_index_truncated = False
         for target_db, target_alias in target_pairs:
-            target_items = [self._metadata(target_db, book_id, target_alias) for book_id in self._all_book_ids(target_db)]
+            target_ids = self._all_book_ids(target_db)
+            remaining = max(0, 2000 - indexed_target_count)
+            selected_target_ids = target_ids[:remaining]
+            if len(selected_target_ids) < len(target_ids):
+                target_index_truncated = True
+            target_items = [self._metadata(target_db, book_id, target_alias) for book_id in selected_target_ids]
+            indexed_target_count += len(target_items)
             indexes.append((target_alias, target_items))
         matches = []
         total_candidates = 0
+        scanned_source_count = 0
         for source_id in source_ids:
+            scanned_source_count += 1
             source = self._metadata(source_db, source_id, source_alias)
             source_identifiers, source_title = self._normalised_match_fields(source)
             candidates = []
@@ -581,9 +950,9 @@ class CalibreRpcBridge:
         return {
             "source_library": source_alias,
             "target_libraries": [alias for _db, alias in target_pairs],
-            "scanned_source_count": len(source_ids),
+            "scanned_source_count": scanned_source_count,
             "matches": matches,
-            "truncated": len(source_ids) < len(self._all_book_ids(source_db)) or total_candidates >= 2000,
+            "truncated": len(source_ids) < len(all_source_ids) or target_index_truncated or total_candidates >= 2000,
         }
 
     def _switch_library(self, params: dict[str, Any]) -> dict[str, Any]:

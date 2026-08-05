@@ -49,6 +49,7 @@ class CalibreSourceContractTests(unittest.TestCase):
             "cover": ["self", "book_id", "as_file", "as_image", "as_path", "as_pixmap"],
             "copy_format_to": ["self", "book_id", "fmt", "dest", "use_hardlink", "report_file_size"],
             "formats": ["self", "book_id", "verify_formats"],
+            "format_abspath": ["self", "book_id", "fmt"],
             "list_extra_files": ["self", "book_id", "use_cache", "pattern"],
             "copy_extra_file_to": ["self", "book_id", "relpath", "stream_or_path"],
             "set_field": ["self", "name", "book_id_to_val_map", "allow_case_change", "do_path_update"],
@@ -66,6 +67,10 @@ class CalibreSourceContractTests(unittest.TestCase):
         for name, prefix in expected_prefixes.items():
             self.assertIn(name, methods)
             self.assertEqual(methods[name][: len(prefix)], prefix)
+
+    def test_legacy_format_path_contract_matches_calibre_9_12_mapping(self):
+        methods = self.class_methods("calibre/db/legacy.py", "LibraryDatabase")
+        self.assertEqual(methods["format_abspath"][:4], ["self", "index", "fmt", "index_is_id"])
 
     def test_conversion_contracts_match_calibre_9_12_mapping(self):
         tool_functions = self.top_level_functions("calibre/gui2/tools.py")

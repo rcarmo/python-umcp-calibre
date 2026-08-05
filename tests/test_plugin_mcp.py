@@ -78,13 +78,17 @@ class PluginMCPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "calibre-umcp")
         self.assertEqual(initialized["result"]["serverInfo"]["schemaVersion"], "2")
-        self.assertEqual(initialized["result"]["serverInfo"]["toolsetVersion"], "2")
+        self.assertEqual(initialized["result"]["serverInfo"]["toolsetVersion"], "3")
         self.assertEqual(initialized["result"]["capabilities"], {"tools": {"listChanged": False}})
 
         _, listed = self.post(base, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         tools = {tool["name"]: tool for tool in listed["result"]["tools"]}
         self.assertIn("capabilities_readonly", tools)
         self.assertIn("search_books_readonly", tools)
+        self.assertIn("get_book_formats_readonly", tools)
+        self.assertIn("inspect_book_format_readonly", tools)
+        self.assertIn("assess_book_quality_readonly", tools)
+        self.assertIn("compare_book_quality_readonly", tools)
         self.assertNotIn("move_book_destructive", tools)
         for tool in tools.values():
             if "outputSchema" in tool:
@@ -101,7 +105,7 @@ class PluginMCPTests(unittest.TestCase):
         )
         content = capabilities["result"]["structuredContent"]
         self.assertEqual(content["schema_version"], 2)
-        self.assertEqual(content["toolset_version"], 2)
+        self.assertEqual(content["toolset_version"], 3)
         self.assertFalse(content["cross_library_configured"])
         self.assertFalse(content["cross_library_available"])
         self.assertEqual(content["readable_target_count"], 0)
@@ -232,6 +236,15 @@ class PluginMCPTests(unittest.TestCase):
         self.assertFalse(server.mutation_runtime_supported)
         self.assertNotIn("capabilities_mutation", names)
         self.assertNotIn("update_book_metadata_mutation", names)
+
+    def test_missing_readonly_job_preserves_stable_error_code(self):
+        server = CalibrePluginMCPServer(FakeGui())
+        self.addCleanup(server.bridge.close)
+        with self.assertRaisesRegex(ValueError, "^JOB_NOT_FOUND:"):
+            server.tool_get_bridge_job_status_readonly("missing")
+        capabilities = server.tool_capabilities_readonly()
+        self.assertIn("JOB_NOT_FOUND", capabilities["stable_errors"])
+        self.assertIn("POLICY_DENIED", capabilities["stable_errors"])
 
     def test_health_and_bearer_auth(self):
         base = self.start_server(token="secret")

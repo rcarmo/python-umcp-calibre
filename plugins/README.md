@@ -49,6 +49,12 @@ The plugin publishes Streamable HTTP at `POST /mcp` and a small unauthenticated 
 
 MCP clients should reconnect and refresh `tools/list` after plugin upgrades whenever `toolset_version` changes; gateways may otherwise retain an older tool catalogue.
 
+## Read-Only Quality Assessment
+
+The MCP-only quality workflow adds `get_book_formats_readonly`, `inspect_book_format_readonly`, `assess_book_quality_readonly` and `compare_book_quality_readonly`. The first release deeply inspects EPUB only. It reports path-free size and modification metadata, container validity, embedded metadata agreement, cover and TOC structure, bounded text metrics and explainable scoring reasons.
+
+Inspection never returns ebook text or internal paths. Files, archive entries, expanded size, scanned content and elapsed time are bounded; unsupported formats, missing files, read failures and exceeded limits use stable structured error codes. All database access remains library-broker-backed and the visible GUI library is never switched implicitly.
+
 ## Mutation Gate And Current Limits
 
 Mutation tools only appear when the runtime is exactly Calibre 9.12.0, a token has been saved in the plugin UI, and mutation discovery is explicitly enabled there. An environment-only token can enforce HTTP auth, but it does not enable mutations by itself, and a different override token disables mutation discovery. In container deployments that means `CALIBRE_UMCP_BRIDGE_TOKEN` is not enough on its own: save the same token in the plugin UI and check Enable implemented mutation tools if you want `capabilities_mutation()` to appear.

@@ -171,6 +171,10 @@ class CalibrePluginMCPServer(MCPServer):
                 {"name": "list_libraries_readonly", "summary": "Redacted configured aliases and current cross-library availability."},
                 {"name": "search_books_readonly", "summary": "Bounded Calibre search."},
                 {"name": "get_book_metadata_readonly", "summary": "Metadata for one book id."},
+                {"name": "get_book_formats_readonly", "summary": "Safe file size and modification metadata for one book's formats."},
+                {"name": "inspect_book_format_readonly", "summary": "Bounded EPUB container, metadata, structure, and content signals."},
+                {"name": "assess_book_quality_readonly", "summary": "Explainable quality score for one book and its formats."},
+                {"name": "compare_book_quality_readonly", "summary": "MCP-only quality comparison for two candidate books."},
                 {"name": "find_duplicates_readonly", "summary": "Probable duplicate groups in one selected library."},
                 {"name": "find_cross_library_duplicates_readonly", "summary": "Compare selected source books against configured target libraries."},
                 {"name": "content_server_status_readonly", "summary": "Existing authenticated content-server base URL, when safe."},
@@ -290,6 +294,36 @@ class CalibrePluginMCPServer(MCPServer):
         """Return metadata for one library-scoped Calibre book id."""
         return self._call_read("get_book_metadata", {"book_id": book_id, "library": library})
 
+    def tool_get_book_formats_readonly(self, book_id: int, library: str = "current") -> dict[str, Any]:
+        """Return bounded, path-free format size and modification metadata for one book."""
+        return self._call_read("get_book_formats", {"book_id": book_id, "library": library})
+
+    def tool_inspect_book_format_readonly(
+        self, book_id: int, format: str, library: str = "current", include_text_sample: bool = False
+    ) -> dict[str, Any]:
+        """Inspect one EPUB without returning paths or book text; other formats fail with a stable code."""
+        return self._call_read("inspect_book_format", {
+            "book_id": book_id,
+            "format": format,
+            "library": library,
+            "include_text_sample": include_text_sample,
+        })
+
+    def tool_assess_book_quality_readonly(
+        self, book_id: int, library: str = "current", formats: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Return a conservative, explainable quality score using bounded EPUB inspection."""
+        params: dict[str, Any] = {"book_id": book_id, "library": library}
+        if formats is not None:
+            params["formats"] = formats
+        return self._call_read("assess_book_quality", params)
+
+    def tool_compare_book_quality_readonly(
+        self, left: dict[str, Any], right: dict[str, Any], policy: str = "prefer_epub_then_metadata"
+    ) -> dict[str, Any]:
+        """Compare two library-scoped books and recommend which candidate to keep without mutation."""
+        return self._call_read("compare_book_quality", {"left": left, "right": right, "policy": policy})
+
     def tool_find_duplicates_readonly(self, limit: int = 1000, library: str = "current", cursor: str = "") -> dict[str, Any]:
         """Find probable duplicate books in one selected library."""
         return self._call_read("find_duplicates", {"limit": limit, "library": library, "cursor": cursor})
@@ -321,7 +355,7 @@ class CalibrePluginMCPServer(MCPServer):
 
     def tool_get_bridge_job_status_readonly(self, job_id: str) -> dict[str, Any]:
         """Return one bridge audit record."""
-        return self.bridge.call_serialized("get_job_status", {"job_id": job_id})
+        return self._call_read("get_job_status", {"job_id": job_id})
 
     def _require_mutations(self) -> None:
         if not self.mutations_enabled:

@@ -10,6 +10,7 @@ import tempfile
 import threading
 import types
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -170,6 +171,7 @@ class FakeDb:
             3: FakeMetadata("Other", ["Someone"]),
         }
         self.new_api = FakeNewApi(self)
+        self.format_paths = {}
 
     def all_book_ids(self):
         return list(self.rows)
@@ -184,6 +186,10 @@ class FakeDb:
     def formats(self, book_id, index_is_id=True):
         self.assert_index_is_id(index_is_id)
         return ",".join(self.new_api.format_data.get(book_id, {}))
+
+    def format_abspath(self, book_id, fmt, index_is_id=True):
+        self.assert_index_is_id(index_is_id)
+        return self.format_paths.get((book_id, fmt.upper()))
 
     @staticmethod
     def assert_index_is_id(index_is_id):
@@ -296,6 +302,30 @@ class FakeGui:
 
 class CalibreRpcBridgeTests(unittest.TestCase):
     @staticmethod
+    def write_epub(path: Path, title="Example", author="Author", cover=True, toc=True, body=None, identifier="urn:isbn:9780000000002"):
+        body = body or ("Chapter text. " * 600)
+        manifest_extra = '<item id="cover" href="cover.jpg" media-type="image/jpeg" properties="cover-image"/>' if cover else ""
+        nav_item = '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>' if toc else ""
+        package = f'''<?xml version="1.0" encoding="UTF-8"?>
+        <package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">
+          <metadata><dc:title>{title}</dc:title><dc:creator>{author}</dc:creator>{f'<dc:identifier>{identifier}</dc:identifier>' if identifier else ''}</metadata>
+          <manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>{manifest_extra}{nav_item}</manifest>
+          <spine><itemref idref="chapter"/></spine>
+        </package>'''
+        container = '''<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="EPUB/package.opf" media-type="application/oebps-package+xml"/></rootfiles></container>'''
+        chapter = f'<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Chapter</h1><p>{body}</p></body></html>'
+        nav = '<html xmlns="http://www.w3.org/1999/xhtml"><body><nav><ol><li><a href="chapter.xhtml">Chapter</a></li></ol></nav></body></html>'
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+            archive.writestr("META-INF/container.xml", container)
+            archive.writestr("EPUB/package.opf", package)
+            archive.writestr("EPUB/chapter.xhtml", chapter)
+            if cover:
+                archive.writestr("EPUB/cover.jpg", b"image")
+            if toc:
+                archive.writestr("EPUB/nav.xhtml", nav)
+
+    @staticmethod
     def threaded_job_factory(type_name, description, func, args, callback):
         return FakeThreadedJob(type_name, description, func, args, callback)
 
@@ -364,6 +394,83 @@ class CalibreRpcBridgeTests(unittest.TestCase):
         self.assertEqual(result["library"], "current")
         self.assertNotIn("library_path", result["items"][0])
         self.assertEqual(result["items"][0]["formats"], ["EPUB", "PDF"])
+
+    def test_format_inventory_and_bounded_epub_inspection_are_path_and_content_safe(self):
+        gui = FakeGui()
+        bridge = CalibreRpcBridge(gui)
+        with tempfile.TemporaryDirectory() as root:
+            epub = Path(root) / "private-title.epub"
+            self.write_epub(epub)
+            gui.current_db.format_paths[(1, "EPUB")] = str(epub)
+            formats = bridge.dispatch("get_book_formats", {"book_id": 1})
+            self.assertEqual(formats["formats"][0]["format"], "EPUB")
+            self.assertGreater(formats["formats"][0]["size_bytes"], 0)
+            self.assertNotIn(str(epub), json.dumps(formats))
+            inspected = bridge.dispatch("inspect_book_format", {"book_id": 1, "format": "epub"})
+            self.assertTrue(inspected["container"]["valid"])
+            self.assertTrue(inspected["structure"]["has_cover"])
+            self.assertTrue(inspected["structure"]["has_toc"])
+            self.assertEqual(inspected["structure"]["toc_entries"], 1)
+            self.assertEqual(inspected["metadata"]["record_metadata_match"], "full")
+            self.assertGreater(inspected["content_signals"]["estimated_text_chars"], 5000)
+            self.assertFalse(inspected["limits"]["text_sample_included"])
+            payload = json.dumps(inspected)
+            self.assertNotIn(str(epub), payload)
+            self.assertNotIn("Chapter text", payload)
+
+    def test_quality_assessment_and_comparison_are_explainable(self):
+        gui = FakeGui()
+        bridge = CalibreRpcBridge(gui)
+        with tempfile.TemporaryDirectory() as root:
+            good = Path(root) / "good.epub"
+            poor = Path(root) / "poor.epub"
+            self.write_epub(good)
+            self.write_epub(poor, title="Other", author="Someone", cover=False, toc=False, body="Short")
+            gui.current_db.format_paths[(1, "EPUB")] = str(good)
+            gui.current_db.format_paths[(3, "EPUB")] = str(poor)
+            assessed = bridge.dispatch("assess_book_quality", {"book_id": 1, "formats": ["EPUB"]})
+            self.assertGreaterEqual(assessed["score"], 75)
+            self.assertEqual(assessed["best_format"], "EPUB")
+            self.assertIn("container_valid", assessed["format_scores"][0]["reasons"])
+            self.assertIn("identifier:isbn", assessed["format_scores"][0]["reasons"])
+            self.write_epub(good, identifier="")
+            without_embedded_id = bridge.dispatch("assess_book_quality", {"book_id": 1, "formats": ["EPUB"]})
+            self.assertNotIn("identifier:isbn", without_embedded_id["format_scores"][0]["reasons"])
+            self.write_epub(good)
+            compared = bridge.dispatch("compare_book_quality", {
+                "left": {"book_id": 3, "formats": ["EPUB"]},
+                "right": {"book_id": 1, "formats": ["EPUB"]},
+            })
+            self.assertEqual(compared["recommendation"]["keep"], "right")
+            self.assertIn("right_has_higher_quality_score", compared["recommendation"]["reasons"])
+
+    def test_format_inspection_has_stable_failures_and_limits(self):
+        gui = FakeGui()
+        bridge = CalibreRpcBridge(gui)
+        with self.assertRaises(BridgeMethodError) as unsupported:
+            bridge.dispatch("inspect_book_format", {"book_id": 1, "format": "PDF"})
+        self.assertEqual(unsupported.exception.code, "FORMAT_UNSUPPORTED")
+        with self.assertRaises(BridgeMethodError) as missing:
+            bridge.dispatch("inspect_book_format", {"book_id": 1, "format": "EPUB"})
+        self.assertEqual(missing.exception.code, "FORMAT_NOT_FOUND")
+        with self.assertRaises(BridgeMethodError) as sample:
+            bridge.dispatch("inspect_book_format", {"book_id": 1, "format": "EPUB", "include_text_sample": True})
+        self.assertEqual(sample.exception.code, "POLICY_DENIED")
+        with tempfile.TemporaryDirectory() as root:
+            oversized = Path(root) / "oversized.epub"
+            with oversized.open("wb") as stream:
+                stream.truncate(64 * 1024 * 1024 + 1)
+            gui.current_db.format_paths[(1, "EPUB")] = str(oversized)
+            with self.assertRaises(BridgeMethodError) as limited:
+                bridge.dispatch("inspect_book_format", {"book_id": 1, "format": "EPUB"})
+            self.assertEqual(limited.exception.code, "INSPECTION_LIMIT_EXCEEDED")
+            valid = Path(root) / "valid.epub"
+            self.write_epub(valid)
+            gui.current_db.format_paths[(1, "EPUB")] = str(valid)
+            with patch.object(queue.Queue, "get", side_effect=queue.Empty):
+                with self.assertRaises(BridgeMethodError) as timed_out:
+                    bridge.dispatch("inspect_book_format", {"book_id": 1, "format": "EPUB"})
+            self.assertEqual(timed_out.exception.code, "INSPECTION_TIMEOUT")
 
     def test_content_server_url_is_exposed_only_when_running_and_authenticated(self):
         gui = FakeGui()
@@ -585,6 +692,14 @@ class CalibreRpcBridgeTests(unittest.TestCase):
             }
             self.assertIn("identifier:isbn", reasons)
             self.assertIn("title_authors", reasons)
+            selective = bridge.dispatch("find_cross_library_duplicates", {
+                "source_library": "incoming",
+                "target_libraries": ["main"],
+                "source_query": "Shared ISBN",
+                "limit": 10,
+            })
+            self.assertEqual(selective["scanned_source_count"], 1)
+            self.assertFalse(selective["truncated"])
 
             with self.assertRaises(BridgeMethodError) as rejected:
                 bridge.dispatch("update_book_metadata", {"library": "main", "book_id": 1, "changes": {}})
