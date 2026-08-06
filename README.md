@@ -16,7 +16,7 @@ Read-only discovery is small on purpose. Agents should start with `capabilities_
 * `inspect_book_format_readonly(book_id, format="EPUB", library="current")` performs bounded EPUB container, metadata, cover, TOC and content-signal checks without returning book text.
 * `assess_book_quality_readonly(...)` assigns a conservative score with stable, explainable reason and warning codes; EPUB is the only deeply inspected format in this first release.
 * `compare_book_quality_readonly(left, right)` compares two library-scoped records entirely through MCP and recommends which candidate to keep, but never mutates either record.
-* `find_duplicates_readonly(library="current", limit=1000)` groups probable duplicates through Calibre's 9.12 `new_api.all_book_ids()` enumeration.
+* `find_duplicates_readonly(library="current", limit=100, target_limit=100, cursor="")` compares one bounded source/target segment through Calibre's 9.12 `new_api.all_book_ids()` enumeration. Continue with the opaque cursor to cover pairs that span chunk boundaries.
 * `find_cross_library_duplicates_readonly(source_library, target_libraries, limit=5, target_limit=100, cursor="")` compares one bounded source/target segment by normalized identifiers and title/authors without switching the visible GUI library. Partial responses include progress fields and an opaque `next_cursor`.
 * `content_server_status_readonly()` reports only an existing authenticated content-server base URL, and only when the bind is concrete enough to be honest about.
 * `list_bridge_jobs_readonly()` and `get_bridge_job_status_readonly(job_id)` expose the bridge's own job and audit records.

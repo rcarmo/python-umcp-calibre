@@ -30,8 +30,9 @@ from urllib.parse import urlparse
 
 BRIDGE_VERSION = PLUGIN_VERSION_STRING
 SCHEMA_VERSION = 2
-TOOLSET_VERSION = 4
+TOOLSET_VERSION = 5
 SUPPORTED_CALIBRE_MUTATION_VERSION = (9, 12, 0)
+MAX_MUTATION_BATCH = 100
 
 
 def mutation_runtime_supported() -> bool:
@@ -78,6 +79,7 @@ STABLE_MUTATION_ERRORS = frozenset({
     "PATH_NOT_ALLOWED",
     "UNSUPPORTED_BY_CALIBRE_VERSION",
     "PARTIAL_COPY",
+    "ACTIVE_JOB_CONFLICT",
 })
 
 
@@ -217,7 +219,7 @@ class CalibreRpcBridge:
         }:
             self._require_active_guards(params)
         if method == "ping":
-            return {"ok": True, "version": BRIDGE_VERSION, "library_path": self._library_path()}
+            return {"ok": True, "version": BRIDGE_VERSION, "active_library": self._active_alias()}
         if method == "list_libraries":
             return self._list_libraries()
         if method == "search_books":
@@ -881,43 +883,86 @@ class CalibreRpcBridge:
         except Exception as exc:
             raise BridgeMethodError("CALIBRE_READ_FAILED", "Calibre could not enumerate books") from exc
 
+    def _duplicate_cursor(self, source_offset: int, target_offset: int, arguments: dict[str, Any]) -> str:
+        payload = {
+            "v": 2,
+            "s": source_offset,
+            "t": target_offset,
+            "f": self._cursor_fingerprint("duplicates", arguments),
+        }
+        return base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
+
+    def _duplicate_cursor_offsets(self, cursor: Any, arguments: dict[str, Any]) -> tuple[int, int]:
+        if not cursor:
+            return 0, 0
+        try:
+            payload = json.loads(base64.urlsafe_b64decode(str(cursor) + "=" * (-len(str(cursor)) % 4)))
+            offsets = int(payload["s"]), int(payload["t"])
+            if (
+                payload.get("v") != 2
+                or payload.get("f") != self._cursor_fingerprint("duplicates", arguments)
+                or any(value < 0 for value in offsets)
+            ):
+                raise ValueError
+            return offsets
+        except Exception as exc:
+            raise BridgeMethodError("CURSOR_INVALID", "The duplicate cursor does not match this request") from exc
+
     def _find_duplicates(self, params: dict[str, Any]) -> dict[str, Any]:
         db, alias = self._resolve_library(params.get("library"))
-        limit = max(1, min(int(params.get("limit") or 1000), 5000))
-        arguments = {"library": alias, "limit": limit}
-        offset = self._cursor_offset(params.get("cursor"), "duplicates", arguments)
+        source_limit = max(1, min(int(params.get("limit") or 100), 500))
+        target_limit = max(1, min(int(params.get("target_limit") or 100), 500))
+        arguments = {"library": alias, "limit": source_limit, "target_limit": target_limit}
+        source_offset, target_offset = self._duplicate_cursor_offsets(params.get("cursor"), arguments)
         ids = self._all_book_ids(db)
-        selected = ids[offset: offset + limit]
-        identifier_buckets: dict[tuple[str, str], set[int]] = {}
-        title_buckets: dict[tuple[str, tuple[str, ...]], set[int]] = {}
-        items: dict[int, dict[str, Any]] = {}
-        for book_id in selected:
-            item = self._metadata(db, book_id, alias)
-            items[book_id] = item
-            identifiers, title_authors = self._normalised_match_fields(item)
-            for pair in identifiers.items():
-                identifier_buckets.setdefault(pair, set()).add(book_id)
-            if title_authors[0] and title_authors[1]:
-                title_buckets.setdefault(title_authors, set()).add(book_id)
-        groups: dict[tuple[int, ...], set[str]] = {}
-        for (kind, _value), book_ids in identifier_buckets.items():
-            if len(book_ids) > 1:
-                groups.setdefault(tuple(sorted(book_ids)), set()).add(f"identifier:{kind}")
-        for book_ids in title_buckets.values():
-            if len(book_ids) > 1:
-                groups.setdefault(tuple(sorted(book_ids)), set()).add("title_authors")
+        if (source_offset >= len(ids) or target_offset >= len(ids)) and ids:
+            raise BridgeMethodError("CURSOR_INVALID", "The duplicate cursor is past the current result set")
+        source_ids = ids[source_offset: source_offset + source_limit]
+        target_ids = ids[target_offset: target_offset + target_limit]
+        cache = {
+            book_id: self._metadata(db, book_id, alias)
+            for book_id in sorted(set(source_ids).union(target_ids))
+        }
+        normalised = {book_id: self._normalised_match_fields(item) for book_id, item in cache.items()}
+        groups: dict[tuple[int, int], set[str]] = {}
+        candidate_queries = 0
+        for source_id in source_ids:
+            source_identifiers, source_title = normalised[source_id]
+            for target_id in target_ids:
+                if target_id <= source_id:
+                    continue
+                candidate_queries += 1
+                target_identifiers, target_title = normalised[target_id]
+                shared = sorted(
+                    kind for kind, value in source_identifiers.items()
+                    if target_identifiers.get(kind) == value
+                )
+                reasons = {f"identifier:{kind}" for kind in shared}
+                if source_title[0] and source_title == target_title:
+                    reasons.add("title_authors")
+                if reasons:
+                    groups.setdefault((source_id, target_id), set()).update(reasons)
         result = [
-            {"count": len(book_ids), "books": [items[book_id] for book_id in book_ids], "reasons": sorted(reasons)}
+            {"count": 2, "books": [cache[book_id] for book_id in book_ids], "reasons": sorted(reasons)}
             for book_ids, reasons in sorted(groups.items())
         ]
-        truncated = offset + limit < len(ids)
+        next_offsets = None
+        if target_offset + len(target_ids) < len(ids):
+            next_offsets = source_offset, target_offset + len(target_ids)
+        elif source_offset + len(source_ids) < len(ids):
+            next_offsets = source_offset + len(source_ids), 0
+        next_cursor = self._duplicate_cursor(*next_offsets, arguments) if next_offsets else None
         return {
             "library": alias,
             "items": result,
-            "limit": limit,
-            "scanned": len(selected),
-            "truncated": truncated,
-            "next_cursor": self._next_cursor(offset + limit, "duplicates", arguments) if truncated else None,
+            "limit": source_limit,
+            "target_limit": target_limit,
+            "source_scanned": len(source_ids),
+            "target_scanned": len(target_ids),
+            "scanned": len(source_ids),
+            "candidate_queries": candidate_queries,
+            "truncated": next_cursor is not None,
+            "next_cursor": next_cursor,
         }
 
     def _cross_library_cursor(
@@ -1093,10 +1138,12 @@ class CalibreRpcBridge:
             switch(str(entry["path"]), allow_rebuild=False)
         except Exception as exc:
             raise BridgeMethodError("LIBRARY_SWITCH_BLOCKED", "Calibre could not switch to the requested library") from exc
+        # Once Calibre's switch call returns, stale mutation guards must be invalidated even
+        # if the subsequent identity check cannot prove that the requested library is active.
+        self.active_generation += 1
         observed = self._entry_for_path(self._library_path())
         if observed is None or observed.get("alias") != target:
             raise BridgeMethodError("LIBRARY_IDENTITY_MISMATCH", "Calibre did not activate the requested library")
-        self.active_generation += 1
         return {"active_library": target, "active_generation": self.active_generation, "switched": True}
 
     def _require_active_guards(self, params: dict[str, Any]) -> None:
@@ -1142,7 +1189,64 @@ class CalibreRpcBridge:
         row = current.row() if current is not None and callable(getattr(current, "row", None)) else -1
         model.refresh_ids((book_id,), current_row=row)
 
+    def _book_refresh_warnings(self, book_id: int, *, cover_browser: bool = False) -> list[str]:
+        warnings = []
+        try:
+            self._refresh_book(book_id)
+        except Exception:
+            warnings.append("gui_model_notification_failed")
+        if cover_browser:
+            refresh_covers = getattr(self.gui, "refresh_cover_browser", None)
+            if callable(refresh_covers):
+                try:
+                    refresh_covers()
+                except Exception:
+                    warnings.append("cover_browser_notification_failed")
+        return warnings
+
+    def _book_added_warnings(self) -> list[str]:
+        model = getattr(getattr(self.gui, "library_view", None), "model", lambda: None)()
+        notify = getattr(model, "books_added", None)
+        if not callable(notify):
+            return []
+        try:
+            notify(1)
+            return []
+        except Exception:
+            return ["gui_model_notification_failed"]
+
+    def _active_job_book_ids(self) -> set[int]:
+        active: set[int] = set()
+        for contexts in (
+            self._conversion_context,
+            self._copy_context,
+            self._save_context,
+            self._email_context,
+        ):
+            for context in contexts.values():
+                if context.get("book_id") is not None:
+                    active.add(int(context["book_id"]))
+                active.update(int(value) for value in context.get("book_ids", ()))
+        return active
+
+    def _require_no_active_book_jobs(self, book_ids) -> None:
+        conflicts = sorted(set(int(value) for value in book_ids).intersection(self._active_job_book_ids()))
+        if conflicts:
+            raise BridgeMethodError("ACTIVE_JOB_CONFLICT", "One or more requested books have active Calibre jobs")
+
+    @staticmethod
+    def _mutation_book_ids(params: dict[str, Any]) -> set[int]:
+        values = []
+        if params.get("book_id") is not None:
+            values.append(params["book_id"])
+        values.extend(params.get("book_ids") or ())
+        if params.get("survivor_id") is not None:
+            values.append(params["survivor_id"])
+        values.extend(params.get("source_ids") or ())
+        return {int(value) for value in values}
+
     def _run_short_mutation(self, method: str, params: dict[str, Any], operation) -> dict[str, Any]:
+        self._require_no_active_book_jobs(self._mutation_book_ids(params))
         job_id = self._record_job(method, params, "queued", "Accepted for serialised GUI-thread execution")
         self._update_job(job_id, status="waiting_for_gui", message="Waiting for Calibre database access")
         self._update_job(job_id, status="running", message="Applying database mutation")
@@ -1276,8 +1380,8 @@ class CalibreRpcBridge:
                 if rollback_error is not None:
                     detail += f"; rollback failed: {rollback_error}"
                 raise BridgeMethodError("CALIBRE_JOB_FAILED", detail) from exc
-            self._refresh_book(book_id)
-            return {"book_id": book_id, "updated_fields": sorted(changes)}
+            warnings = self._book_refresh_warnings(book_id)
+            return {"book_id": book_id, "updated_fields": sorted(changes), "warnings": warnings}
 
         return self._run_short_mutation("update_book_metadata", params, operation)
 
@@ -1328,14 +1432,16 @@ class CalibreRpcBridge:
                     raise BridgeMethodError("DUPLICATE_REJECTED", f"Calibre declined format {fmt}")
             except Exception as exc:
                 rollback_error = None
-                if previous is not None:
-                    try:
+                try:
+                    if previous is not None:
                         api.add_format(
                             book_id, fmt, io.BytesIO(previous), replace=True,
                             run_hooks=False, dbapi=self._db(),
                         )
-                    except Exception as rollback_exc:
-                        rollback_error = rollback_exc
+                    elif api.format(book_id, fmt) is not None:
+                        api.remove_formats({book_id: {fmt}})
+                except Exception as rollback_exc:
+                    rollback_error = rollback_exc
                 try:
                     self._refresh_book(book_id)
                 except Exception:
@@ -1346,8 +1452,8 @@ class CalibreRpcBridge:
                 if rollback_error is not None:
                     detail += f"; rollback failed: {rollback_error}"
                 raise BridgeMethodError("CALIBRE_JOB_FAILED", detail) from exc
-            self._refresh_book(book_id)
-            return {"book_id": book_id, "format": fmt, "replaced": previous is not None}
+            warnings = self._book_refresh_warnings(book_id)
+            return {"book_id": book_id, "format": fmt, "replaced": previous is not None, "warnings": warnings}
 
         return self._run_short_mutation("add_book_format", params, operation)
 
@@ -1387,8 +1493,8 @@ class CalibreRpcBridge:
                 if rollback_error is not None:
                     detail += f"; rollback failed: {rollback_error}"
                 raise BridgeMethodError("CALIBRE_JOB_FAILED", detail) from exc
-            self._refresh_book(book_id)
-            return {"book_id": book_id, "format": fmt, "removed": True}
+            warnings = self._book_refresh_warnings(book_id)
+            return {"book_id": book_id, "format": fmt, "removed": True, "warnings": warnings}
 
         return self._run_short_mutation("delete_book_format", params, operation)
 
@@ -1480,7 +1586,7 @@ class CalibreRpcBridge:
             self.calibre_jobs.pop(job_id, None)
             self._import_context.pop(job_id, None)
             error = exc if isinstance(exc, BridgeMethodError) else BridgeMethodError(
-                "CALIBRE_JOB_FAILED", f"Book import was not queued: {exc}",
+                "CALIBRE_JOB_FAILED", "Book import could not be queued",
             )
             self._update_job(job_id, status="failed", message="Book import was not queued", error=str(error))
             if error is exc:
@@ -1547,17 +1653,19 @@ class CalibreRpcBridge:
             if len(ids) != 1:
                 raise BridgeMethodError("CALIBRE_JOB_FAILED", "Calibre did not return exactly one imported book id")
             book_id = int(ids[0])
-            self._refresh_book(book_id)
-            model = getattr(getattr(self.gui, "library_view", None), "model", lambda: None)()
-            notify = getattr(model, "books_added", None)
-            if callable(notify):
-                notify(1)
+            warnings = self._book_refresh_warnings(book_id)
+            warnings.extend(self._book_added_warnings())
             self._update_job(
                 job_id,
                 status="completed",
                 progress=1.0,
                 message="Book imported into active library",
-                result={"added": True, "book_id": book_id, "format": context["format"]},
+                result={
+                    "added": True,
+                    "book_id": book_id,
+                    "format": context["format"],
+                    "warnings": sorted(set(warnings)),
+                },
                 error=None,
             )
         except Exception as exc:
@@ -1594,11 +1702,13 @@ class CalibreRpcBridge:
                 if rollback_error is not None:
                     detail += f"; rollback failed: {rollback_error}"
                 raise BridgeMethodError("CALIBRE_JOB_FAILED", detail) from exc
-            self._refresh_book(book_id)
-            refresh_covers = getattr(self.gui, "refresh_cover_browser", None)
-            if callable(refresh_covers):
-                refresh_covers()
-            return {"book_id": book_id, "removed": remove, "replaced": previous is not None and not remove}
+            warnings = self._book_refresh_warnings(book_id, cover_browser=True)
+            return {
+                "book_id": book_id,
+                "removed": remove,
+                "replaced": previous is not None and not remove,
+                "warnings": warnings,
+            }
 
         return self._run_short_mutation("set_book_cover", params, operation)
 
@@ -1607,6 +1717,8 @@ class CalibreRpcBridge:
         if not isinstance(raw_ids, list) or not raw_ids:
             raise BridgeMethodError("POLICY_DENIED", "book_ids must be a non-empty list")
         book_ids = tuple(dict.fromkeys(int(value) for value in raw_ids))
+        if len(book_ids) > MAX_MUTATION_BATCH:
+            raise BridgeMethodError("POLICY_DENIED", f"At most {MAX_MUTATION_BATCH} books may be deleted per request")
         permanent = bool(params.get("permanent", False))
         dry_run = bool(params.get("dry_run", True))
 
@@ -1652,6 +1764,8 @@ class CalibreRpcBridge:
         source_ids = tuple(dict.fromkeys(int(value) for value in raw_sources if int(value) != survivor_id))
         if not source_ids:
             raise BridgeMethodError("POLICY_DENIED", "At least one source record distinct from the survivor is required")
+        if len(source_ids) > MAX_MUTATION_BATCH:
+            raise BridgeMethodError("POLICY_DENIED", f"At most {MAX_MUTATION_BATCH} source records may be merged per request")
         confirmation = "MERGE_KEEP_SOURCES:" + str(survivor_id) + ":" + ",".join(map(str, source_ids))
         if params.get("confirmation") != confirmation:
             raise BridgeMethodError("POLICY_DENIED", f"Exact confirmation required: {confirmation}")
@@ -1660,21 +1774,6 @@ class CalibreRpcBridge:
             api = self._new_api()
             for book_id in (survivor_id, *source_ids):
                 self._require_book(api, book_id)
-            active_ids = set()
-            for contexts in (
-                self._conversion_context,
-                self._import_context,
-                self._copy_context,
-                self._save_context,
-                self._email_context,
-            ):
-                for context in contexts.values():
-                    if context.get("book_id") is not None:
-                        active_ids.add(int(context["book_id"]))
-                    active_ids.update(int(value) for value in context.get("book_ids", ()))
-            conflicts = sorted(active_ids.intersection((survivor_id, *source_ids)))
-            if conflicts:
-                raise BridgeMethodError("POLICY_DENIED", f"Books have active Calibre jobs: {conflicts}")
             merger = getattr(api, "merge_book_metadata", None)
             cover_getter = getattr(api, "cover", None)
             cover_setter = getattr(api, "set_cover", None)
@@ -1732,12 +1831,13 @@ class CalibreRpcBridge:
                 if rollback_errors:
                     detail += "; rollback failed: " + "; ".join(rollback_errors)
                 raise BridgeMethodError("CALIBRE_JOB_FAILED", detail) from exc
-            self._refresh_book(survivor_id)
+            warnings = self._book_refresh_warnings(survivor_id)
             return {
                 "survivor_id": survivor_id,
                 "source_ids": list(source_ids),
                 "sources_deleted": False,
                 "added_formats": sorted(set(added_formats)),
+                "warnings": warnings,
             }
 
         return self._run_short_mutation("merge_duplicates", params, operation)
@@ -1948,6 +2048,9 @@ class CalibreRpcBridge:
             raise BridgeMethodError("BOOK_NOT_FOUND", "book_ids must be an integer list") from exc
         if not book_ids:
             raise BridgeMethodError("BOOK_NOT_FOUND", "At least one source book is required")
+        if len(book_ids) > MAX_MUTATION_BATCH:
+            raise BridgeMethodError("POLICY_DENIED", f"At most {MAX_MUTATION_BATCH} books may be copied or moved per request")
+        self._require_no_active_book_jobs(book_ids)
         source_path = Path(self._library_path()).expanduser().resolve()
         destination_path = self._allowed_destination_library(params.get("destination_library"))
         api = self._new_api()
@@ -2014,7 +2117,9 @@ class CalibreRpcBridge:
         except Exception as exc:
             self.calibre_jobs.pop(job_id, None)
             self._copy_context.pop(job_id, None)
-            error = exc if isinstance(exc, BridgeMethodError) else BridgeMethodError("CALIBRE_JOB_FAILED", str(exc))
+            error = exc if isinstance(exc, BridgeMethodError) else BridgeMethodError(
+                "CALIBRE_JOB_FAILED", "Library copy could not be queued"
+            )
             self._update_job(job_id, status="failed", message="Library copy was not queued", error=str(error))
             if error is exc:
                 raise
@@ -2259,7 +2364,7 @@ class CalibreRpcBridge:
             if not files:
                 return {"ok": False, "code": "FORMAT_NOT_FOUND", "message": "Calibre produced no export artefacts"}
             targets = [(path, destination / path.relative_to(staging)) for path in files]
-            collisions = [str(target) for _, target in targets if target.exists()]
+            collisions = [target.name for _, target in targets if target.exists()]
             if collisions and not overwrite:
                 return {
                     "ok": False,
@@ -2291,8 +2396,8 @@ class CalibreRpcBridge:
             return {
                 "ok": True,
                 "book_id": book_id,
-                "destination_directory": str(destination),
-                "artifacts": [str(path) for path in published[:200]],
+                "destination_directory": "configured_destination",
+                "artifacts": [path.name for path in published[:200]],
                 "artifact_count": len(published),
             }
         except Exception as exc:
@@ -2320,6 +2425,7 @@ class CalibreRpcBridge:
 
     def _save_book_to_disk(self, params: dict[str, Any]) -> dict[str, Any]:
         book_id = int(params["book_id"])
+        self._require_no_active_book_jobs((book_id,))
         api = self._new_api()
         self._require_book(api, book_id)
         source_path = Path(self._library_path()).expanduser().resolve()
@@ -2353,7 +2459,9 @@ class CalibreRpcBridge:
         except Exception as exc:
             self.calibre_jobs.pop(job_id, None)
             self._save_context.pop(job_id, None)
-            error = exc if isinstance(exc, BridgeMethodError) else BridgeMethodError("CALIBRE_JOB_FAILED", str(exc))
+            error = exc if isinstance(exc, BridgeMethodError) else BridgeMethodError(
+                "CALIBRE_JOB_FAILED", "Save-to-disk could not be queued"
+            )
             self._update_job(job_id, status="failed", message="Save-to-disk was not queued", error=str(error))
             if error is exc:
                 raise
@@ -2486,7 +2594,7 @@ class CalibreRpcBridge:
                 "ok": True,
                 "book_id": book_id,
                 "format": fmt,
-                "recipient": recipient,
+                "recipient": "configured_recipient",
                 "smtp_accepted": True,
                 "delivery_confirmed": False,
             }
@@ -2500,6 +2608,7 @@ class CalibreRpcBridge:
 
     def _email_book(self, params: dict[str, Any]) -> dict[str, Any]:
         book_id = int(params["book_id"])
+        self._require_no_active_book_jobs((book_id,))
         api = self._new_api()
         self._require_book(api, book_id)
         recipient = str(params.get("recipient") or "").strip()
@@ -2557,7 +2666,9 @@ class CalibreRpcBridge:
         except Exception as exc:
             self.calibre_jobs.pop(job_id, None)
             self._email_context.pop(job_id, None)
-            error = exc if isinstance(exc, BridgeMethodError) else BridgeMethodError("CALIBRE_JOB_FAILED", str(exc))
+            error = exc if isinstance(exc, BridgeMethodError) else BridgeMethodError(
+                "CALIBRE_JOB_FAILED", "E-mail could not be queued"
+            )
             self._update_job(job_id, status="failed", message="E-mail was not queued", error=str(error))
             if error is exc:
                 raise
@@ -2650,6 +2761,7 @@ class CalibreRpcBridge:
 
     def _convert_book(self, params: dict[str, Any]) -> dict[str, Any]:
         book_id = int(params["book_id"])
+        self._require_no_active_book_jobs((book_id,))
         output_format = self._format_name(params.get("output_format"))
         replace_existing = bool(params.get("replace_existing", False))
         store_result = bool(params.get("store_result", True))
@@ -2740,7 +2852,7 @@ class CalibreRpcBridge:
             self._cleanup_temp_files((context or {}).get("temp_files", temp_files))
             error = exc if isinstance(exc, BridgeMethodError) else BridgeMethodError(
                 "CALIBRE_JOB_FAILED",
-                f"Conversion was not queued: {exc}",
+                "Conversion could not be queued",
             )
             self._update_job(job_id, status="failed", message="Conversion was not queued", error=str(error))
             if error is exc:
@@ -2792,8 +2904,8 @@ class CalibreRpcBridge:
                         raise BridgeMethodError("DUPLICATE_REJECTED", "Calibre declined the converted format")
                 except Exception as exc:
                     rollback_error = None
-                    if context["previous"] is not None:
-                        try:
+                    try:
+                        if context["previous"] is not None:
                             api.add_format(
                                 book_id,
                                 output_format,
@@ -2802,23 +2914,36 @@ class CalibreRpcBridge:
                                 run_hooks=False,
                                 dbapi=self._db(),
                             )
-                        except Exception as rollback_exc:
-                            rollback_error = rollback_exc
+                        elif api.format(book_id, output_format) is not None:
+                            api.remove_formats({book_id: {output_format}})
+                    except Exception as rollback_exc:
+                        rollback_error = rollback_exc
                     detail = f"Could not attach converted format: {exc}"
                     if rollback_error is not None:
                         detail += f"; rollback failed: {rollback_error}"
                     raise BridgeMethodError("CALIBRE_JOB_FAILED", detail) from exc
+                warnings = []
                 try:
                     from calibre.customize.ui import run_plugins_on_postconvert
                     run_plugins_on_postconvert(self._db(), book_id, output_format)
                 except ImportError:
                     pass
+                except Exception:
+                    warnings.append("postconvert_plugin_notification_failed")
                 signal = getattr(self.gui, "book_converted", None)
                 if signal is not None and callable(getattr(signal, "emit", None)):
-                    signal.emit(book_id, output_format)
-                self._refresh_book(book_id)
+                    try:
+                        signal.emit(book_id, output_format)
+                    except Exception:
+                        warnings.append("book_converted_notification_failed")
+                warnings.extend(self._book_refresh_warnings(book_id))
                 message = "Conversion completed and format attached"
-                result = {"book_id": book_id, "format": output_format, "stored": True}
+                result = {
+                    "book_id": book_id,
+                    "format": output_format,
+                    "stored": True,
+                    "warnings": sorted(set(warnings)),
+                }
             else:
                 destination = self._allowed_export_path(str(context["export_path"]), output_format)
                 if destination.exists() and not context["overwrite_export"]:
@@ -2839,7 +2964,7 @@ class CalibreRpcBridge:
                     "book_id": book_id,
                     "format": output_format,
                     "stored": False,
-                    "artifact": str(destination),
+                    "artifact_name": destination.name,
                 }
             self._update_job(
                 job_id,
@@ -3003,7 +3128,7 @@ class CalibreRpcBridge:
             "completed_at": now if status in {"completed", "failed", "cancelled", "rejected"} else None,
             "progress": 1.0 if status == "completed" else 0.0,
             "calibre_job_id": None,
-            "library_path": Path(self._library_path()).name,
+            "library": self._active_alias(),
             "params": self._safe_params(params),
             "result": None,
             "error": None,
@@ -3041,6 +3166,10 @@ class CalibreRpcBridge:
                 record = self.job_records[job_id]
             except KeyError as exc:
                 raise BridgeMethodError("JOB_NOT_FOUND", f"Unknown calibre-umcp job id: {job_id}") from exc
+            if "result" in changes:
+                changes["result"] = self._safe_job_result(changes["result"])
+            if changes.get("error") is not None:
+                changes["error"] = self._redact_public_text(str(changes["error"]))
             record.update(changes)
             if changes.get("status") == "running" and record.get("started_at") is None:
                 record["started_at"] = time.time()
@@ -3080,18 +3209,60 @@ class CalibreRpcBridge:
                     return value
                 return value
 
-            self.audit_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.audit_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(redact(record), sort_keys=True) + "\n")
+            try:
+                self.audit_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.audit_path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(redact(record), sort_keys=True) + "\n")
+            except Exception:
+                # Audit persistence must never turn a completed database mutation into
+                # an apparent failure that invites an unsafe retry.
+                pass
+
+    def _redact_public_text(self, value: str) -> str:
+        for path in sorted({
+            self._library_path(),
+            *(str(item) for item in self.import_roots),
+            *(str(item) for item in self.export_roots),
+            *(str(item) for item in self.destination_libraries),
+        }, key=len, reverse=True):
+            if path:
+                value = value.replace(path, "<configured-path>")
+        value = re.sub(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "<configured-recipient>", value)
+        value = re.sub(r"(?i)\b(?:https?|smtp)://[^\s/]+", "<private-host>", value)
+        value = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", value)
+        value = re.sub(r"(?<![A-Za-z0-9._-])/(?:[^\s;:,]+/?)+", "<filesystem-path>", value)
+        value = re.sub(r"(?i)\b[A-Z]:\\(?:[^\s;:,]+\\?)+", "<filesystem-path>", value)
+        return value
+
+    def _safe_job_result(self, result: Any) -> Any:
+        if not isinstance(result, dict):
+            return result
+        safe = {}
+        for key, value in result.items():
+            if key == "recipient":
+                safe[key] = "configured_recipient"
+            elif key in {"destination_directory", "destination_library", "library_path"}:
+                safe[key] = "configured_destination"
+            elif key == "artifact" and value:
+                safe["artifact_name"] = Path(str(value)).name
+            elif key in {"artifacts", "collisions"} and isinstance(value, (list, tuple)):
+                safe[key] = [Path(str(item)).name for item in value]
+            elif isinstance(value, dict):
+                safe[key] = self._safe_job_result(value)
+            elif isinstance(value, str):
+                safe[key] = self._redact_public_text(value)
+            else:
+                safe[key] = value
+        return safe
 
     def _safe_params(self, params: dict[str, Any]) -> dict[str, Any]:
         redacted = dict(params)
-        for key in ("token", "password", "secret"):
+        for key in ("token", "password", "secret", "recipient"):
             if key in redacted:
                 redacted[key] = "<redacted>"
         if isinstance(redacted.get("changes"), dict):
             redacted["changes"] = {"fields": sorted(redacted["changes"])}
-        for key in ("path", "export_path", "destination_library", "destination_directory"):
+        for key in ("path", "export_path", "destination_directory"):
             if redacted.get(key):
                 redacted[key] = Path(str(redacted[key])).name
         return redacted
@@ -3149,7 +3320,11 @@ def serve_bridge(gui, host: str, port: int, token: str | None = None, audit_path
                     {
                         "jsonrpc": "2.0",
                         "id": request_id,
-                        "error": {"code": -32000, "message": exc.message, "data": {"code": exc.code}},
+                        "error": {
+                            "code": -32000,
+                            "message": bridge._redact_public_text(exc.message),
+                            "data": {"code": exc.code},
+                        },
                     },
                 )
             except Exception as exc:
@@ -3161,7 +3336,7 @@ def serve_bridge(gui, host: str, port: int, token: str | None = None, audit_path
                         "error": {
                             "code": -32603,
                             "message": "Calibre bridge operation failed",
-                            "data": {"code": "CALIBRE_OPERATION_FAILED", "detail": str(exc)[-4000:]},
+                            "data": {"code": "CALIBRE_OPERATION_FAILED"},
                         },
                     },
                 )

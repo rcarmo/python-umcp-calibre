@@ -196,7 +196,7 @@ class CalibrePluginMCPServer(MCPServer):
             "inspect_book_format_readonly": {"arguments": {"book_id": "integer Calibre id", "format": "EPUB in this release", "library": "configured alias or current", "include_text_sample": "must remain false"}, "returns": "bounded container, metadata, structure and content metrics without text"},
             "assess_book_quality_readonly": {"arguments": {"book_id": "integer Calibre id", "library": "configured alias or current", "formats": "optional list of up to eight formats"}, "returns": "explainable score plus structured inspection errors"},
             "compare_book_quality_readonly": {"arguments": {"left": "library and book_id object", "right": "library and book_id object", "policy": "prefer_epub_then_metadata"}, "returns": "quality summaries and a non-mutating recommendation"},
-            "find_duplicates_readonly": {"arguments": {"limit": "default 1000, max 5000", "library": "configured alias or current", "cursor": "opaque continuation"}},
+            "find_duplicates_readonly": {"arguments": {"limit": "source chunk, default 100, max 500", "target_limit": "comparison chunk, default 100, max 500", "library": "configured alias or current", "cursor": "opaque continuation"}, "returns": "one bounded pair-comparison segment with progress and next_cursor"},
             "find_cross_library_duplicates_readonly": {"arguments": {"source_library": "configured alias", "target_libraries": "one to sixteen configured aliases", "source_query": "optional Calibre query", "limit": "source chunk, default 5, max 25", "target_limit": "target chunk, default 100, max 250", "candidate_limit_per_book": "default 20, max 100", "cursor": "opaque continuation"}, "returns": "one bounded target segment, progress fields, partial matches and next_cursor"},
             "content_server_status_readonly": {"arguments": {}, "returns": "running/auth status and a base URL only for authenticated concrete binds"},
             "list_bridge_jobs_readonly": {"arguments": {}},
@@ -225,11 +225,11 @@ class CalibrePluginMCPServer(MCPServer):
                 "returns": "queued bridge job record linked to Calibre ThreadedJob",
             },
             "delete_books_mutation": {
-                "arguments": {"book_ids": "non-empty id list", "dry_run": "default true", "confirmation": "exact value returned by dry-run", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
+                "arguments": {"book_ids": "non-empty id list, max 100", "dry_run": "default true", "confirmation": "exact value returned by dry-run", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
                 "returns": "preview or Calibre-trash result",
             },
             "merge_duplicates_mutation": {
-                "arguments": {"survivor_id": "explicit survivor", "source_ids": "records retained after merge", "confirmation": "exact MERGE_KEEP_SOURCES value", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
+                "arguments": {"survivor_id": "explicit survivor", "source_ids": "records retained after merge, max 100", "confirmation": "exact MERGE_KEEP_SOURCES value", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
                 "returns": "completed conservative merge record",
             },
             "convert_book_mutation": {
@@ -237,11 +237,11 @@ class CalibrePluginMCPServer(MCPServer):
                 "returns": "queued bridge job record linked to Calibre JobManager",
             },
             "copy_books_to_library_mutation": {
-                "arguments": {"book_ids": "source ids", "destination_library": "exact UI-allowlisted library", "duplicate_policy": "reject, skip, add, merge_missing or replace", "destination_book_ids": "required source-to-destination map for merge policies", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
+                "arguments": {"book_ids": "source ids, max 100", "destination_library": "exact UI-allowlisted library", "duplicate_policy": "reject, skip, add, merge_missing or replace", "destination_book_ids": "required source-to-destination map for merge policies", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
                 "returns": "queued, independently verified Calibre ThreadedJob record",
             },
             "move_books_to_library_mutation": {
-                "arguments": {"book_ids": "source ids", "destination_library": "exact UI-allowlisted library", "dry_run": "default true", "confirmation": "exact preview value", "duplicate_policy": "explicit policy", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
+                "arguments": {"book_ids": "source ids, max 100", "destination_library": "exact UI-allowlisted library", "dry_run": "default true", "confirmation": "exact preview value", "duplicate_policy": "explicit policy", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
                 "returns": "preview or queued verified-copy-then-trash job record",
             },
             "save_book_to_disk_mutation": {
@@ -331,9 +331,13 @@ class CalibrePluginMCPServer(MCPServer):
         """Compare two library-scoped books and recommend which candidate to keep without mutation."""
         return self._call_read("compare_book_quality", {"left": left, "right": right, "policy": policy})
 
-    def tool_find_duplicates_readonly(self, limit: int = 1000, library: str = "current", cursor: str = "") -> dict[str, Any]:
-        """Find probable duplicate books in one selected library."""
-        return self._call_read("find_duplicates", {"limit": limit, "library": library, "cursor": cursor})
+    def tool_find_duplicates_readonly(
+        self, limit: int = 100, target_limit: int = 100, library: str = "current", cursor: str = ""
+    ) -> dict[str, Any]:
+        """Compare one bounded pair segment for probable duplicates in one selected library."""
+        return self._call_read("find_duplicates", {
+            "limit": limit, "target_limit": target_limit, "library": library, "cursor": cursor,
+        })
 
     def tool_find_cross_library_duplicates_readonly(
         self,

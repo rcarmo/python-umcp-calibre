@@ -5,7 +5,7 @@ except ImportError:  # Allows unit tests to import bridge modules outside Calibr
         pass
 
 
-PLUGIN_VERSION = (0, 2, 2)
+PLUGIN_VERSION = (0, 2, 3)
 PLUGIN_VERSION_STRING = ".".join(str(part) for part in PLUGIN_VERSION)
 
 

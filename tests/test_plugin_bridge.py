@@ -391,7 +391,7 @@ class CalibreRpcBridgeTests(unittest.TestCase):
 
     def test_bridge_ping_reports_version_and_current_library(self):
         bridge = CalibreRpcBridge(FakeGui())
-        self.assertEqual(bridge.dispatch("ping", {}), {"ok": True, "version": BRIDGE_VERSION, "library_path": "/books"})
+        self.assertEqual(bridge.dispatch("ping", {}), {"ok": True, "version": BRIDGE_VERSION, "active_library": "current"})
 
     def test_bridge_searches_current_library(self):
         bridge = CalibreRpcBridge(FakeGui())
@@ -547,6 +547,21 @@ class CalibreRpcBridgeTests(unittest.TestCase):
         self.assertEqual(len(result["items"]), 1)
         self.assertEqual(result["items"][0]["count"], 2)
         self.assertIn("identifier:isbn", result["items"][0]["reasons"])
+
+    def test_duplicate_pagination_finds_pairs_across_chunk_boundaries(self):
+        gui = FakeGui()
+        gui.current_db.rows[4] = FakeMetadata("Far Away", ["Different"], {"isbn": "1"})
+        bridge = CalibreRpcBridge(gui)
+        params = {"limit": 2, "target_limit": 2}
+        found = set()
+        while True:
+            page = bridge.dispatch("find_duplicates", params)
+            found.update(tuple(book["id"] for book in item["books"]) for item in page["items"])
+            if not page["next_cursor"]:
+                break
+            params["cursor"] = page["next_cursor"]
+        self.assertIn((1, 4), found)
+        self.assertIn((2, 4), found)
 
     def test_duplicate_enumeration_uses_calibre_new_api(self):
         db = FakeDb()
@@ -802,7 +817,7 @@ class CalibreRpcBridgeTests(unittest.TestCase):
         self.assertTrue(caller.is_alive())
         bridge._execute_on_gui(method, params, reply)
         caller.join(timeout=2)
-        self.assertEqual(result["value"]["library_path"], "/books")
+        self.assertEqual(result["value"]["active_library"], "current")
         bridge.close()
 
     def test_call_serialized_after_close_reports_shutdown_code(self):
@@ -947,7 +962,7 @@ class CalibreRpcBridgeTests(unittest.TestCase):
         with self.assertRaises(BridgeMethodError) as caught:
             bridge.dispatch("convert_book", {"book_id": 1, "output_format": "MOBI"})
         self.assertEqual(caught.exception.code, "CALIBRE_JOB_FAILED")
-        self.assertIn("queue exploded", caught.exception.message)
+        self.assertEqual(caught.exception.message, "Conversion could not be queued")
         self.assertFalse(Path(manager.failed_args[0]).exists())
         self.assertFalse(Path(manager.failed_args[1]).exists())
         self.assertFalse(bridge.calibre_jobs)
@@ -1641,7 +1656,7 @@ class CalibreRpcBridgeTests(unittest.TestCase):
                     "confirmation": "MERGE_KEEP_SOURCES:1:2",
                 },
             )
-        self.assertEqual(caught.exception.code, "POLICY_DENIED")
+        self.assertEqual(caught.exception.code, "ACTIVE_JOB_CONFLICT")
         self.assertIn("active Calibre jobs", caught.exception.message)
 
     def test_duplicate_merge_keeps_sources_and_adds_only_missing_formats(self):
@@ -1718,7 +1733,8 @@ class CalibreRpcBridgeTests(unittest.TestCase):
             native.callback(native)
             completed = bridge.dispatch("get_job_status", {"job_id": queued["id"]})
             self.assertEqual(completed["status"], "completed")
-            self.assertEqual(completed["result"]["artifact"], str(destination))
+            self.assertEqual(completed["result"]["artifact_name"], destination.name)
+            self.assertNotIn(str(destination.parent), json.dumps(completed))
             self.assertEqual(destination.read_bytes(), b"exported mobi")
             self.assertIsNone(gui.current_db.new_api.format(1, "MOBI"))
 
@@ -1823,6 +1839,104 @@ class CalibreRpcBridgeTests(unittest.TestCase):
             written = audit_path.read_text(encoding="utf-8")
             self.assertNotIn(str(export_root), written)
             self.assertNotIn(str(destination), written)
+
+    def test_mutation_batches_are_bounded(self):
+        bridge = CalibreRpcBridge(FakeGui(), destination_libraries=("/configured/destination",))
+        oversized = list(range(2, 103))
+        cases = (
+            ("delete_books", {"book_ids": oversized}),
+            ("merge_duplicates", {"survivor_id": 1, "source_ids": oversized}),
+            ("copy_books_to_library", {
+                "book_ids": oversized,
+                "destination_library": "/configured/destination",
+            }),
+        )
+        for method, params in cases:
+            with self.subTest(method=method), self.assertRaises(BridgeMethodError) as caught:
+                bridge.dispatch(method, params)
+            self.assertEqual(caught.exception.code, "POLICY_DENIED")
+            self.assertIn("At most 100", caught.exception.message)
+
+    def test_active_book_job_blocks_immediate_and_queued_mutations(self):
+        bridge = CalibreRpcBridge(FakeGui(), conversion_adapter=self.conversion_adapter)
+        bridge._save_context["active-save"] = {"book_id": 1}
+        for method, params in (
+            ("update_book_metadata", {"book_id": 1, "changes": {"title": "Unsafe"}}),
+            ("convert_book", {"book_id": 1, "output_format": "MOBI"}),
+        ):
+            with self.subTest(method=method), self.assertRaises(BridgeMethodError) as caught:
+                bridge.dispatch(method, params)
+            self.assertEqual(caught.exception.code, "ACTIVE_JOB_CONFLICT")
+
+    def test_committed_metadata_change_survives_gui_refresh_failure_with_warning(self):
+        gui = FakeGui()
+        gui.library_view.model().refresh_ids = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("refresh failed"))
+        completed = CalibreRpcBridge(gui).dispatch(
+            "update_book_metadata", {"book_id": 1, "changes": {"title": "Committed"}}
+        )
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(gui.current_db.rows[1].title, "Committed")
+        self.assertEqual(completed["result"]["warnings"], ["gui_model_notification_failed"])
+
+    def test_failed_new_conversion_attachment_removes_partial_format(self):
+        gui = FakeGui()
+        bridge = CalibreRpcBridge(gui, conversion_adapter=self.conversion_adapter)
+        queued = bridge.dispatch("convert_book", {"book_id": 1, "output_format": "MOBI"})
+        native = gui.job_manager.jobs[0]
+        Path(native.args[1]).write_bytes(b"partial mobi")
+        gui.current_db.new_api.fail_add_once = True
+        native.callback(native)
+        failed = bridge.dispatch("get_job_status", {"job_id": queued["id"]})
+        self.assertEqual(failed["status"], "failed")
+        self.assertIsNone(gui.current_db.new_api.format(1, "MOBI"))
+
+    def test_switch_generation_advances_when_post_switch_identity_check_fails(self):
+        with tempfile.TemporaryDirectory() as root:
+            current = Path(root) / "current"
+            target = Path(root) / "target"
+            current.mkdir()
+            target.mkdir()
+            gui = SimpleNamespace(
+                current_db=FakeDb(str(current), "current-id"),
+                job_manager=FakeJobManager(),
+                proceed_question=SimpleNamespace(questions=[]),
+                library_moved=lambda *args, **kwargs: None,
+            )
+            bridge = CalibreRpcBridge(gui, library_registry=(
+                {"alias": "current", "path": str(current), "read": True, "switch": True},
+                {"alias": "target", "path": str(target), "read": True, "switch": True},
+            ), library_switching_enabled=True)
+            with self.assertRaises(BridgeMethodError) as caught:
+                bridge.dispatch("switch_library", {"library": "target", "confirmation": "SWITCH_LIBRARY:target"})
+            self.assertEqual(caught.exception.code, "LIBRARY_IDENTITY_MISMATCH")
+            self.assertEqual(bridge.active_generation, 1)
+
+    def test_audit_write_failure_does_not_reclassify_committed_mutation(self):
+        with tempfile.TemporaryDirectory() as root:
+            gui = FakeGui()
+            completed = CalibreRpcBridge(gui, audit_path=root).dispatch(
+                "update_book_metadata", {"book_id": 1, "changes": {"title": "Committed"}}
+            )
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(gui.current_db.rows[1].title, "Committed")
+
+    def test_public_job_records_redact_recipient_paths_and_private_hosts(self):
+        bridge = CalibreRpcBridge(FakeGui(), export_roots=("/private/export",))
+        job_id = bridge._record_job(
+            "fixture", {"recipient": "reader@example.test", "export_path": "/private/export/book.epub"},
+            "running", "fixture",
+        )
+        record = bridge._update_job(
+            job_id,
+            status="failed",
+            result={"artifact": "/private/export/book.epub", "recipient": "reader@example.test"},
+            error="SMTP https://private.internal failed for reader@example.test at /private/export/book.epub",
+        )
+        serialised = json.dumps(record)
+        self.assertNotIn("reader@example.test", serialised)
+        self.assertNotIn("/private/export", serialised)
+        self.assertNotIn("private.internal", serialised)
+        self.assertEqual(record["result"]["artifact_name"], "book.epub")
 
     def test_rejected_mutation_can_write_jsonl_audit_record(self):
         with tempfile.TemporaryDirectory() as tmp:

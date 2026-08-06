@@ -115,7 +115,7 @@ The existing tools gain an optional `library` property in their MCP schemas:
 ```text
 search_books_readonly(query="", limit=20, library="current", cursor=null)
 get_book_metadata_readonly(book_id, library="current")
-find_duplicates_readonly(limit=1000, library="current", cursor=null)
+find_duplicates_readonly(limit=100, target_limit=100, library="current", cursor=null)
 ```
 
 List-shaped results become object-shaped and carry scope and pagination:
