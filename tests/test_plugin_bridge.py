@@ -47,6 +47,18 @@ class FakeMetadata:
         return None
 
 
+class CalibreCloneOnlyMetadata(FakeMetadata):
+    """Model Calibre Metadata, which must be cloned via deepcopy_metadata()."""
+
+    def __deepcopy__(self, memo):
+        raise AttributeError("'Metadata' object has no attribute '_data'")
+
+    def deepcopy_metadata(self):
+        clone = FakeMetadata(self.title, list(self.authors), dict(self.identifiers), list(self.tags))
+        clone.__dict__.update(copy.deepcopy(self.__dict__))
+        return clone
+
+
 class FakeNewApi:
     def __init__(self, db):
         self.db = db
@@ -862,6 +874,16 @@ class CalibreRpcBridgeTests(unittest.TestCase):
         self.assertEqual(gui.library_view.model().refreshed[-1], ((1,), 0))
         self.assertEqual(job["params"]["changes"], {"fields": ["authors", "custom", "identifiers", "language", "rating", "tags", "title"]})
 
+    def test_metadata_mutation_uses_calibre_metadata_clone_api(self):
+        gui = FakeGui()
+        original = CalibreCloneOnlyMetadata("Example", ["Author"], {"isbn": "1"})
+        gui.current_db.get_metadata = lambda book_id, **kwargs: original
+        completed = CalibreRpcBridge(gui).dispatch(
+            "update_book_metadata", {"book_id": 1, "changes": {"title": "Updated"}}
+        )
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(gui.current_db.rows[1].title, "Updated")
+
     def test_metadata_mutation_rolls_back_on_failure(self):
         gui = FakeGui()
         gui.current_db.new_api.fail_set_once = True
@@ -1658,6 +1680,20 @@ class CalibreRpcBridgeTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "ACTIVE_JOB_CONFLICT")
         self.assertIn("active Calibre jobs", caught.exception.message)
+
+    def test_duplicate_merge_uses_calibre_metadata_clone_api(self):
+        gui = FakeGui()
+        original = CalibreCloneOnlyMetadata("Example", ["Author"], {"isbn": "1"})
+        gui.current_db.get_metadata = lambda book_id, **kwargs: original
+        merged = CalibreRpcBridge(gui).dispatch(
+            "merge_duplicates",
+            {
+                "survivor_id": 1,
+                "source_ids": [2],
+                "confirmation": "MERGE_KEEP_SOURCES:1:2",
+            },
+        )
+        self.assertEqual(merged["status"], "completed")
 
     def test_duplicate_merge_keeps_sources_and_adds_only_missing_formats(self):
         gui = FakeGui()

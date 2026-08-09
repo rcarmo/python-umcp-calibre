@@ -1266,6 +1266,13 @@ class CalibreRpcBridge:
         )
 
     @staticmethod
+    def _clone_metadata(metadata):
+        clone = getattr(metadata, "deepcopy_metadata", None)
+        if callable(clone):
+            return clone()
+        return copy.deepcopy(metadata)
+
+    @staticmethod
     def _set_metadata_value(mi, field: str, value: Any) -> None:
         setter = getattr(mi, "set", None)
         if callable(setter):
@@ -1293,7 +1300,7 @@ class CalibreRpcBridge:
     def _prepare_metadata(self, api, original, changes: dict[str, Any]):
         if not isinstance(changes, dict) or not changes:
             raise BridgeMethodError("POLICY_DENIED", "changes must be a non-empty object")
-        updated = copy.deepcopy(original)
+        updated = self._clone_metadata(original)
         supported = {
             "title", "authors", "series", "series_index", "tags", "identifiers",
             "publisher", "language", "languages", "comments", "rating", "pubdate",
@@ -1362,7 +1369,7 @@ class CalibreRpcBridge:
             api = self._new_api()
             self._require_book(api, book_id)
             db = self._db()
-            original = copy.deepcopy(db.get_metadata(book_id, index_is_id=True))
+            original = self._clone_metadata(db.get_metadata(book_id, index_is_id=True))
             updated = self._prepare_metadata(api, original, changes)
             try:
                 api.set_metadata(book_id, updated, force_changes=True, allow_case_change=True)
@@ -1779,7 +1786,7 @@ class CalibreRpcBridge:
             cover_setter = getattr(api, "set_cover", None)
             if not all(callable(value) for value in (merger, cover_getter, cover_setter)):
                 raise BridgeMethodError("UNSUPPORTED_BY_CALIBRE_VERSION", "Calibre merge APIs are unavailable")
-            original_metadata = copy.deepcopy(self._db().get_metadata(survivor_id, index_is_id=True))
+            original_metadata = self._clone_metadata(self._db().get_metadata(survivor_id, index_is_id=True))
             original_cover = cover_getter(survivor_id)
             original_formats = {
                 fmt: api.format(survivor_id, fmt)
