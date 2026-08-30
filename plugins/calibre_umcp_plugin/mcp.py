@@ -38,6 +38,7 @@ class CalibrePluginMCPServer(MCPServer):
         "finalize_import_attachment_mutation",
         "stage_import_attachment_mutation",
         "download_scheduled_news_mutation",
+        "update_scheduled_news_schedule_mutation",
         "add_book_mutation",
         "delete_books_mutation",
         "merge_duplicates_mutation",
@@ -149,6 +150,7 @@ class CalibrePluginMCPServer(MCPServer):
                 {"name": "finalize_import_attachment_mutation", "summary": "Checksum-verify an attachment upload and return a short-lived opaque import handle."},
                 {"name": "stage_import_attachment_mutation", "summary": "Stage one small bounded attachment and return a short-lived opaque import handle."},
                 {"name": "download_scheduled_news_mutation", "summary": "Queue one existing configured recipe through Calibre's native Fetch News scheduler."},
+                {"name": "update_scheduled_news_schedule_mutation", "summary": "Change one existing recipe schedule through Calibre's native RecipeModel with verification and rollback."},
                 {"name": "add_book_mutation", "summary": "Queue a confined book import from a configured path or staged handle."},
                 {"name": "delete_books_mutation", "summary": "Dry-run then move confirmed books to Calibre trash."},
                 {"name": "merge_duplicates_mutation", "summary": "Merge missing formats and metadata into an explicit survivor while retaining sources."},
@@ -246,6 +248,10 @@ class CalibrePluginMCPServer(MCPServer):
             "download_scheduled_news_mutation": {
                 "arguments": {"urn": "exact configured builtin: or custom: scheduled recipe", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
                 "returns": "queued bridge job linked to Calibre FetchNewsAction; the native scheduler applies add_news, retention, sync and email rules",
+            },
+            "update_scheduled_news_schedule_mutation": {
+                "arguments": {"urn": "exact existing builtin: or custom: scheduled recipe", "days_of_week": "one to seven unique indexes, Monday=0 through Sunday=6", "hour": "local hour 0 through 23", "minute": "minute 0 through 59", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
+                "returns": "completed bridge job after native RecipeModel update, live verification and preservation checks",
             },
             "delete_book_format_mutation": {
                 "arguments": {"book_id": "integer Calibre id", "format": "explicit extension", "allow_last_format": "required for final format", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
@@ -565,6 +571,25 @@ class CalibrePluginMCPServer(MCPServer):
             "download_scheduled_news",
             self._with_active_guards(
                 {"urn": urn},
+                expected_active_library=expected_active_library,
+                expected_active_generation=expected_active_generation,
+            ),
+        )
+
+    def tool_update_scheduled_news_schedule_mutation(
+        self,
+        urn: str,
+        days_of_week: list[int],
+        hour: int,
+        minute: int,
+        expected_active_library: str | None = None,
+        expected_active_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """Change one existing recipe's local weekly schedule through Calibre's native RecipeModel."""
+        return self._call_mutation(
+            "update_scheduled_news_schedule",
+            self._with_active_guards(
+                {"urn": urn, "days_of_week": days_of_week, "hour": hour, "minute": minute},
                 expected_active_library=expected_active_library,
                 expected_active_generation=expected_active_generation,
             ),

@@ -331,12 +331,21 @@ class FakeSchedulerConfig:
 class FakeRecipeModel:
     def __init__(self, entries):
         self.scheduler_config = FakeSchedulerConfig(entries)
+        self.schedule_info = {"custom:1000": ("days_of_week", [[5], 6, 0])}
+        self.schedule_calls = []
 
     def recipe_from_urn(self, urn):
         return {"title": "Scheduled Economist"} if urn == "custom:1000" else None
 
     def schedule_info_from_urn(self, urn):
-        return ("days_of_week", ([5], 6, 0)) if urn == "custom:1000" else None
+        return self.schedule_info.get(urn)
+
+    def schedule_recipe(self, urn, schedule_type, schedule):
+        if urn not in self.schedule_info:
+            raise ValueError("unknown recipe")
+        normalized = [list(schedule[0]), int(schedule[1]), int(schedule[2])]
+        self.schedule_calls.append((urn, schedule_type, normalized))
+        self.schedule_info[urn] = (schedule_type, normalized)
 
     def get_customize_info(self, urn):
         return SimpleNamespace(keep_issues=4, custom_tags=("News",), add_title_tag=True)
@@ -1087,6 +1096,43 @@ class CalibreRpcBridgeTests(unittest.TestCase):
         self.assertEqual(conflict.exception.code, "NEWS_QUEUE_CONFLICT")
         with self.assertRaises(BridgeMethodError) as absent:
             bridge.dispatch("download_scheduled_news", {"urn": "builtin:economist"})
+        self.assertEqual(absent.exception.code, "NEWS_NOT_SCHEDULED")
+
+    def test_scheduled_news_schedule_uses_native_model_and_preserves_other_settings(self):
+        gui = FakeGui(with_news=True)
+        bridge = CalibreRpcBridge(gui)
+        before = bridge.dispatch("list_scheduled_news", {})["items"][0]
+        updated = bridge.dispatch(
+            "update_scheduled_news_schedule",
+            {"urn": "custom:1000", "days_of_week": [4], "hour": 10, "minute": 0},
+        )
+        after = bridge.dispatch("list_scheduled_news", {})["items"][0]
+
+        self.assertEqual(updated["status"], "completed")
+        self.assertEqual(updated["result"]["schedule_type"], "days_of_week")
+        self.assertEqual(updated["result"]["schedule"], [[4], 10, 0])
+        self.assertEqual(gui.iactions["Fetch News"].scheduler.recipe_model.schedule_calls, [
+            ("custom:1000", "days_of_week", [[4], 10, 0]),
+        ])
+        for field in ("urn", "title", "last_downloaded", "keep_issues", "custom_tags", "add_title_tag"):
+            self.assertEqual(after[field], before[field])
+
+    def test_scheduled_news_schedule_rejects_invalid_values_and_unscheduled_recipes(self):
+        bridge = CalibreRpcBridge(FakeGui(with_news=True))
+        for params in (
+            {"urn": "custom:1000", "days_of_week": [7], "hour": 10, "minute": 0},
+            {"urn": "custom:1000", "days_of_week": [4, 4], "hour": 10, "minute": 0},
+            {"urn": "custom:1000", "days_of_week": [4], "hour": 24, "minute": 0},
+            {"urn": "custom:1000", "days_of_week": [4], "hour": 10, "minute": 60},
+        ):
+            with self.assertRaises(BridgeMethodError) as caught:
+                bridge.dispatch("update_scheduled_news_schedule", params)
+            self.assertEqual(caught.exception.code, "POLICY_DENIED")
+        with self.assertRaises(BridgeMethodError) as absent:
+            bridge.dispatch(
+                "update_scheduled_news_schedule",
+                {"urn": "builtin:economist", "days_of_week": [4], "hour": 10, "minute": 0},
+            )
         self.assertEqual(absent.exception.code, "NEWS_NOT_SCHEDULED")
 
     def test_scheduled_news_waits_for_queued_calibre_signal_delivery(self):

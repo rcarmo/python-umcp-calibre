@@ -63,6 +63,8 @@ The staging tools require the same mutation policy and optional active-library g
 
 `download_scheduled_news_mutation(urn)` accepts only an existing `builtin:` or `custom:` scheduled recipe. One active bridge job per URN is permitted. The bridge queues Calibre's existing `FetchNewsAction` and `Scheduler` path, then briefly processes queued Qt events because Calibre 9.12 delivers `start_recipe_fetch` asynchronously; it correlates the resulting native job by URN before reporting success. Calibre's JobManager performs recipe execution, `add_news`, issue retention, sync and configured e-mail handling. A job record includes a redacted, 4,000-character native log excerpt after the native job completes or fails.
 
+`update_scheduled_news_schedule_mutation(urn, days_of_week, hour, minute)` changes only an already-configured weekly schedule through the live `RecipeModel.schedule_recipe()` method. Day indexes are Monday `0` through Sunday `6`. The bridge verifies the resulting live schedule and unchanged identity, last-download and customization metadata, rolling the schedule back if verification fails.
+
 ## Read-Only Quality Assessment
 
 The MCP-only quality workflow adds `get_book_formats_readonly`, `inspect_book_format_readonly`, `assess_book_quality_readonly` and `compare_book_quality_readonly`. The first release deeply inspects EPUB only. It reports path-free size and modification metadata, container validity, embedded metadata agreement, cover and TOC structure, bounded text metrics and explainable scoring reasons.
