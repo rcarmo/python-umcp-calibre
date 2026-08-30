@@ -49,6 +49,20 @@ The plugin publishes Streamable HTTP at `POST /mcp` and a small unauthenticated 
 
 MCP clients should reconnect and refresh `tools/list` after plugin upgrades whenever `toolset_version` changes; gateways may otherwise retain an older tool catalogue.
 
+## Attachment Staging
+
+Attachment transfer is separate from arbitrary filesystem access. In **Configure bridge**, set an **Attachment staging root** (normally below a configured import root), maximum attachment size and expiry. The UI permits 1 byte–1 GiB attachments and expiries from 60 seconds to 24 hours. Each decoded base64 chunk is limited to 8 MiB.
+
+With mutations enabled, clients upload a file through `begin_import_attachment_mutation`, bounded `append_import_attachment_mutation` calls and `finalize_import_attachment_mutation`. The final SHA-256 must match the declared digest. Finalisation returns a short-lived, one-time `staged_handle` for exactly one `add_book_mutation` or `add_book_format_mutation` request. The bridge deletes the file after consumption; it removes incomplete or checksum-failed uploads immediately and prunes expired files on later staging operations. `stage_import_attachment_mutation` is the one-call convenience tool for modest files.
+
+The staging tools require the same mutation policy and optional active-library generation guards as the other mutation tools. Staging itself does not alter the library. The bridge records opaque handles and file names in its job/audit views; it does not return staging paths or attachment content.
+
+## Scheduled News
+
+`list_scheduled_news_readonly()` reports metadata for recipes already configured in Calibre: URN, title, schedule, last-download marker, issue retention, tags and title-tag setting. It excludes recipe source, account credentials and downloaded content.
+
+`download_scheduled_news_mutation(urn)` accepts only an existing `builtin:` or `custom:` scheduled recipe. One active bridge job per URN is permitted. The bridge queues Calibre's existing `FetchNewsAction` and `Scheduler` path; Calibre's JobManager performs recipe execution, `add_news`, issue retention, sync and configured e-mail handling. A job record includes a redacted, 4,000-character native log excerpt after the native job completes or fails.
+
 ## Read-Only Quality Assessment
 
 The MCP-only quality workflow adds `get_book_formats_readonly`, `inspect_book_format_readonly`, `assess_book_quality_readonly` and `compare_book_quality_readonly`. The first release deeply inspects EPUB only. It reports path-free size and modification metadata, container validity, embedded metadata agreement, cover and TOC structure, bounded text metrics and explainable scoring reasons.
@@ -61,7 +75,7 @@ Cross-library duplicate matching scans one source chunk against one target-libra
 
 Mutation tools only appear when the runtime is exactly Calibre 9.12.0, a token has been saved in the plugin UI, and mutation discovery is explicitly enabled there. An environment-only token can enforce HTTP auth, but it does not enable mutations by itself, and a different override token disables mutation discovery. In container deployments that means `CALIBRE_UMCP_BRIDGE_TOKEN` is not enough on its own: save the same token in the plugin UI and check Enable implemented mutation tools if you want `capabilities_mutation()` to appear.
 
-Import and replacement paths are confined to configured roots. Exports stay under configured export roots. Destination libraries use an exact UI allowlist. E-mail can only use a recipient already configured in Calibre, and only a format already enabled for that recipient.
+Import and replacement paths are confined to configured roots. Attachment staging is opt-in and constrained to its dedicated UI-configured root; files have a bounded size, expiry, SHA-256 validation and one-time handles. Exports stay under configured export roots. Destination libraries use an exact UI allowlist. E-mail can only use a recipient already configured in Calibre, and only a format already enabled for that recipient.
 
 `content_server_status_readonly()` reports only an existing authenticated content-server base URL, and only when the server is running on a concrete advertised host. Wildcard binds, disabled auth and temporary public links stay out of scope.
 

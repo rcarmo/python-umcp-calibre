@@ -33,6 +33,11 @@ class CalibrePluginMCPServer(MCPServer):
         "add_book_format_mutation",
         "delete_book_format_mutation",
         "set_book_cover_mutation",
+        "begin_import_attachment_mutation",
+        "append_import_attachment_mutation",
+        "finalize_import_attachment_mutation",
+        "stage_import_attachment_mutation",
+        "download_scheduled_news_mutation",
         "add_book_mutation",
         "delete_books_mutation",
         "merge_duplicates_mutation",
@@ -69,6 +74,9 @@ class CalibrePluginMCPServer(MCPServer):
             audit_path=audit_path,
             audit_retention=audit_retention,
             import_roots=tuple(getattr(policy, "import_roots", ()) or ()),
+            import_staging_root=getattr(policy, "import_staging_root", None),
+            import_staging_max_bytes=int(getattr(policy, "import_staging_max_bytes", 104857600) or 104857600),
+            import_staging_ttl_seconds=int(getattr(policy, "import_staging_ttl_seconds", 3600) or 3600),
             export_roots=tuple(getattr(policy, "export_roots", ()) or ()),
             destination_libraries=tuple(getattr(policy, "destination_libraries", ()) or ()),
             library_registry=tuple(getattr(policy, "library_registry", ()) or ()),
@@ -133,10 +141,15 @@ class CalibrePluginMCPServer(MCPServer):
             "stable_errors": sorted(STABLE_MUTATION_ERRORS),
             "tools": [
                 {"name": "update_book_metadata_mutation", "summary": "Update validated metadata with rollback."},
-                {"name": "add_book_format_mutation", "summary": "Import a format from a configured root."},
+                {"name": "add_book_format_mutation", "summary": "Import a format from a configured root or a one-time staged attachment handle."},
                 {"name": "delete_book_format_mutation", "summary": "Remove one explicit format with final-format confirmation."},
                 {"name": "set_book_cover_mutation", "summary": "Replace or remove a cover with rollback."},
-                {"name": "add_book_mutation", "summary": "Queue confined book import through Calibre ThreadedJob."},
+                {"name": "begin_import_attachment_mutation", "summary": "Begin a bounded checksum-verified attachment upload into the Calibre staging root."},
+                {"name": "append_import_attachment_mutation", "summary": "Append one bounded base64 chunk to an active attachment upload."},
+                {"name": "finalize_import_attachment_mutation", "summary": "Checksum-verify an attachment upload and return a short-lived opaque import handle."},
+                {"name": "stage_import_attachment_mutation", "summary": "Stage one small bounded attachment and return a short-lived opaque import handle."},
+                {"name": "download_scheduled_news_mutation", "summary": "Queue one existing configured recipe through Calibre's native Fetch News scheduler."},
+                {"name": "add_book_mutation", "summary": "Queue a confined book import from a configured path or staged handle."},
                 {"name": "delete_books_mutation", "summary": "Dry-run then move confirmed books to Calibre trash."},
                 {"name": "merge_duplicates_mutation", "summary": "Merge missing formats and metadata into an explicit survivor while retaining sources."},
                 {"name": "convert_book_mutation", "summary": "Queue one native Calibre conversion job."},
@@ -178,6 +191,7 @@ class CalibrePluginMCPServer(MCPServer):
                 {"name": "find_duplicates_readonly", "summary": "Probable duplicate groups in one selected library."},
                 {"name": "find_cross_library_duplicates_readonly", "summary": "Compare selected source books against configured target libraries."},
                 {"name": "content_server_status_readonly", "summary": "Existing authenticated content-server base URL, when safe."},
+                {"name": "list_scheduled_news_readonly", "summary": "Configured scheduled-news recipes and redacted schedule metadata."},
                 {"name": "list_bridge_jobs_readonly", "summary": "Bridge audit records."},
                 {"name": "get_bridge_job_status_readonly", "summary": "One bridge audit record."},
             ],
@@ -199,6 +213,7 @@ class CalibrePluginMCPServer(MCPServer):
             "find_duplicates_readonly": {"arguments": {"limit": "source chunk, default 100, max 500", "target_limit": "comparison chunk, default 100, max 500", "library": "configured alias or current", "cursor": "opaque continuation"}, "returns": "one bounded pair-comparison segment with progress and next_cursor"},
             "find_cross_library_duplicates_readonly": {"arguments": {"source_library": "configured alias", "target_libraries": "one to sixteen configured aliases", "source_query": "optional Calibre query", "limit": "source chunk, default 5, max 25", "target_limit": "target chunk, default 100, max 250", "candidate_limit_per_book": "default 20, max 100", "cursor": "opaque continuation"}, "returns": "one bounded target segment, progress fields, partial matches and next_cursor"},
             "content_server_status_readonly": {"arguments": {}, "returns": "running/auth status and a base URL only for authenticated concrete binds"},
+            "list_scheduled_news_readonly": {"arguments": {}, "returns": "configured builtin:/custom: scheduled recipes with schedule, last-download and retention metadata; never account credentials"},
             "list_bridge_jobs_readonly": {"arguments": {}},
             "get_bridge_job_status_readonly": {"arguments": {"job_id": "bridge audit id"}},
         }
@@ -209,8 +224,28 @@ class CalibrePluginMCPServer(MCPServer):
                 "returns": "completed bridge job record",
             },
             "add_book_format_mutation": {
-                "arguments": {"book_id": "integer Calibre id", "path": "file below configured import root", "format": "optional extension", "replace": "explicit replacement", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
+                "arguments": {"book_id": "integer Calibre id", "path": "file below configured import root, mutually exclusive with staged_handle", "staged_handle": "one-time opaque result from stage_import_attachment_mutation", "format": "optional extension", "replace": "explicit replacement", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
                 "returns": "completed bridge job record",
+            },
+            "begin_import_attachment_mutation": {
+                "arguments": {"filename": "plain attachment filename", "size_bytes": "positive declared size within UI policy", "sha256": "lowercase sha256 of complete attachment", "format": "optional extension", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
+                "returns": "short-lived upload_handle and maximum permitted base64-decoded chunk size",
+            },
+            "append_import_attachment_mutation": {
+                "arguments": {"upload_handle": "opaque result from begin_import_attachment_mutation", "content_base64": "one attachment chunk, at most declared chunk_max_bytes"},
+                "returns": "safe upload progress only",
+            },
+            "finalize_import_attachment_mutation": {
+                "arguments": {"upload_handle": "opaque result from begin_import_attachment_mutation"},
+                "returns": "checksum-validated one-time staged_handle for add_book or add_book_format",
+            },
+            "stage_import_attachment_mutation": {
+                "arguments": {"filename": "plain attachment filename", "content_base64": "small base64 attachment bytes", "format": "optional extension", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
+                "returns": "short-lived opaque staged_handle plus safe file metadata; requires a UI-configured staging root",
+            },
+            "download_scheduled_news_mutation": {
+                "arguments": {"urn": "exact configured builtin: or custom: scheduled recipe", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
+                "returns": "queued bridge job linked to Calibre FetchNewsAction; the native scheduler applies add_news, retention, sync and email rules",
             },
             "delete_book_format_mutation": {
                 "arguments": {"book_id": "integer Calibre id", "format": "explicit extension", "allow_last_format": "required for final format", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
@@ -221,7 +256,7 @@ class CalibrePluginMCPServer(MCPServer):
                 "returns": "completed bridge job record",
             },
             "add_book_mutation": {
-                "arguments": {"path": "book below configured import root", "format": "optional extension", "duplicate_policy": "reject, skip or add", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
+                "arguments": {"path": "book below configured import root, mutually exclusive with staged_handle", "staged_handle": "one-time opaque result from stage_import_attachment_mutation", "format": "optional extension", "duplicate_policy": "reject, skip or add", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
                 "returns": "queued bridge job record linked to Calibre ThreadedJob",
             },
             "delete_books_mutation": {
@@ -364,6 +399,10 @@ class CalibrePluginMCPServer(MCPServer):
         """Return only an existing authenticated server base URL; never mint temporary links."""
         return self.bridge.call_serialized("content_server_status", {})
 
+    def tool_list_scheduled_news_readonly(self) -> dict[str, Any]:
+        """List configured scheduled news recipes without exposing account credentials or recipe source."""
+        return self._call_read("list_scheduled_news", {})
+
     def tool_list_bridge_jobs_readonly(self) -> dict[str, Any]:
         """List bridge audit records."""
         return {"items": self._call_read("list_jobs", {})}
@@ -417,17 +456,18 @@ class CalibrePluginMCPServer(MCPServer):
     def tool_add_book_format_mutation(
         self,
         book_id: int,
-        path: str,
+        path: str = "",
         format: str = "",
         replace: bool = False,
         expected_active_library: str | None = None,
         expected_active_generation: int | None = None,
+        staged_handle: str = "",
     ) -> dict[str, Any]:
         """Import one format from a UI-configured root, preserving an old format on failure."""
         return self._call_mutation(
             "add_book_format",
             self._with_active_guards(
-                {"book_id": book_id, "path": path, "format": format, "replace": replace},
+                {"book_id": book_id, "path": path, "staged_handle": staged_handle, "format": format, "replace": replace},
                 expected_active_library=expected_active_library,
                 expected_active_generation=expected_active_generation,
             ),
@@ -469,19 +509,81 @@ class CalibrePluginMCPServer(MCPServer):
             ),
         )
 
+    def tool_begin_import_attachment_mutation(
+        self,
+        filename: str,
+        size_bytes: int,
+        sha256: str,
+        format: str = "",
+        expected_active_library: str | None = None,
+        expected_active_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a bounded attachment upload below the configured staging root."""
+        return self._call_mutation(
+            "begin_import_attachment",
+            self._with_active_guards(
+                {"filename": filename, "size_bytes": size_bytes, "sha256": sha256, "format": format},
+                expected_active_library=expected_active_library,
+                expected_active_generation=expected_active_generation,
+            ),
+        )
+
+    def tool_append_import_attachment_mutation(self, upload_handle: str, content_base64: str) -> dict[str, Any]:
+        """Append one bounded attachment chunk to a current upload handle."""
+        return self._call_mutation("append_import_attachment", {"upload_handle": upload_handle, "content_base64": content_base64})
+
+    def tool_finalize_import_attachment_mutation(self, upload_handle: str) -> dict[str, Any]:
+        """Verify a staged attachment checksum and return the one-time import handle."""
+        return self._call_mutation("finalize_import_attachment", {"upload_handle": upload_handle})
+
+    def tool_stage_import_attachment_mutation(
+        self,
+        filename: str,
+        content_base64: str,
+        format: str = "",
+        expected_active_library: str | None = None,
+        expected_active_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """Stage a bounded attachment below the configured Calibre staging root and return a one-time handle."""
+        return self._call_mutation(
+            "stage_import_attachment",
+            self._with_active_guards(
+                {"filename": filename, "content_base64": content_base64, "format": format},
+                expected_active_library=expected_active_library,
+                expected_active_generation=expected_active_generation,
+            ),
+        )
+
+    def tool_download_scheduled_news_mutation(
+        self,
+        urn: str,
+        expected_active_library: str | None = None,
+        expected_active_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """Queue exactly one existing scheduled recipe through Calibre's native scheduler and add_news pipeline."""
+        return self._call_mutation(
+            "download_scheduled_news",
+            self._with_active_guards(
+                {"urn": urn},
+                expected_active_library=expected_active_library,
+                expected_active_generation=expected_active_generation,
+            ),
+        )
+
     def tool_add_book_mutation(
         self,
-        path: str,
+        path: str = "",
         format: str = "",
         duplicate_policy: str = "reject",
         expected_active_library: str | None = None,
         expected_active_generation: int | None = None,
+        staged_handle: str = "",
     ) -> dict[str, Any]:
         """Queue a confined single-book import with explicit duplicate policy."""
         return self._call_mutation(
             "add_book",
             self._with_active_guards(
-                {"path": path, "format": format, "duplicate_policy": duplicate_policy},
+                {"path": path, "staged_handle": staged_handle, "format": format, "duplicate_policy": duplicate_policy},
                 expected_active_library=expected_active_library,
                 expected_active_generation=expected_active_generation,
             ),

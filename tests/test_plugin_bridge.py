@@ -1,4 +1,6 @@
+import base64
 import copy
+import hashlib
 import io
 import json
 import os
@@ -310,11 +312,65 @@ class FakeJobManager:
         job.callback(job)
 
 
+class FakeScheduledRecipe:
+    def __init__(self, urn, title, last_downloaded="2026-08-30T12:00:00Z"):
+        self.values = {"id": urn, "title": title, "last_downloaded": last_downloaded}
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+
+class FakeSchedulerConfig:
+    def __init__(self, entries):
+        self.entries = entries
+
+    def iter_recipes(self):
+        return list(self.entries)
+
+
+class FakeRecipeModel:
+    def __init__(self, entries):
+        self.scheduler_config = FakeSchedulerConfig(entries)
+
+    def recipe_from_urn(self, urn):
+        return {"title": "Scheduled Economist"} if urn == "custom:1000" else None
+
+    def schedule_info_from_urn(self, urn):
+        return ("days_of_week", ([5], 6, 0)) if urn == "custom:1000" else None
+
+    def get_customize_info(self, urn):
+        return SimpleNamespace(keep_issues=4, custom_tags=("News",), add_title_tag=True)
+
+
+class FakeScheduler:
+    def __init__(self, action, entries):
+        self.action = action
+        self.recipe_model = FakeRecipeModel(entries)
+        self.download_queue = set()
+
+    def download(self, urn):
+        if urn in self.download_queue:
+            return False
+        self.download_queue.add(urn)
+        job = FakeNativeJob(len(self.action.gui.job_manager.jobs) + 1, lambda _job: None, f"Fetch {urn}")
+        self.action.gui.job_manager.jobs.append(job)
+        self.action.conversion_jobs[job] = ((), "EPUB", {"urn": urn})
+        return True
+
+
+class FakeFetchNewsAction:
+    def __init__(self, gui):
+        self.gui = gui
+        self.conversion_jobs = {}
+        self.scheduler = FakeScheduler(self, [FakeScheduledRecipe("custom:1000", "Scheduled Economist")])
+
+
 class FakeGui:
-    def __init__(self, job_manager=None):
+    def __init__(self, job_manager=None, with_news=False):
         self.current_db = FakeDb()
         self.library_view = FakeView()
         self.job_manager = job_manager or FakeJobManager()
+        self.iactions = {"Fetch News": FakeFetchNewsAction(self)} if with_news else {}
 
 
 class CalibreRpcBridgeTests(unittest.TestCase):
@@ -904,6 +960,116 @@ class CalibreRpcBridgeTests(unittest.TestCase):
         with self.assertRaises(BridgeMethodError) as composite:
             bridge.dispatch("update_book_metadata", {"book_id": 1, "changes": {"custom": {"#computed": "No"}}})
         self.assertEqual(composite.exception.code, "POLICY_DENIED")
+
+    def test_attachment_staging_is_bounded_one_time_and_can_replace_a_format(self):
+        gui = FakeGui()
+        with tempfile.TemporaryDirectory() as root:
+            bridge = CalibreRpcBridge(gui, import_staging_root=root, import_staging_max_bytes=32, import_staging_ttl_seconds=60)
+            staged = bridge.dispatch("stage_import_attachment", {
+                "filename": "replacement.epub", "content_base64": base64.b64encode(b"new epub").decode(),
+            })
+            self.assertTrue(staged["staged_handle"].startswith("stage:"))
+            self.assertEqual(staged["format"], "EPUB")
+            self.assertTrue(Path(root).glob("*.epub"))
+            completed = bridge.dispatch("add_book_format", {"book_id": 1, "staged_handle": staged["staged_handle"], "replace": True})
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(gui.current_db.new_api.format(1, "EPUB"), b"new epub")
+            self.assertFalse(list(Path(root).glob("*.epub")))
+            self.assertFalse(list(Path(root).glob("*.ready")))
+            self.assertFalse(list(Path(root).glob("*.ready")))
+            with self.assertRaises(BridgeMethodError) as reused:
+                bridge.dispatch("add_book_format", {"book_id": 1, "staged_handle": staged["staged_handle"], "replace": True})
+            self.assertEqual(reused.exception.code, "STAGING_HANDLE_INVALID")
+            with self.assertRaises(BridgeMethodError) as too_big:
+                bridge.dispatch("stage_import_attachment", {
+                    "filename": "too-big.epub", "content_base64": base64.b64encode(b"x" * 33).decode(),
+                })
+            self.assertEqual(too_big.exception.code, "STAGING_LIMIT_EXCEEDED")
+            with self.assertRaises(BridgeMethodError) as invalid_name:
+                bridge.dispatch("stage_import_attachment", {"filename": "../escape.epub", "content_base64": "eA=="})
+            self.assertEqual(invalid_name.exception.code, "POLICY_DENIED")
+
+    def test_chunked_attachment_staging_is_checksum_verified_and_one_time(self):
+        gui = FakeGui()
+        payload = b"chunked epub payload"
+        digest = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as root:
+            bridge = CalibreRpcBridge(gui, import_staging_root=root, import_staging_max_bytes=128, import_staging_ttl_seconds=60)
+            begin = bridge.dispatch("begin_import_attachment", {"filename": "chunked.epub", "size_bytes": len(payload), "sha256": digest})
+            self.assertEqual(begin["chunk_max_bytes"], 128)
+            bridge.dispatch("append_import_attachment", {"upload_handle": begin["upload_handle"], "content_base64": base64.b64encode(payload[:7]).decode()})
+            bridge.dispatch("append_import_attachment", {"upload_handle": begin["upload_handle"], "content_base64": base64.b64encode(payload[7:]).decode()})
+            staged = bridge.dispatch("finalize_import_attachment", {"upload_handle": begin["upload_handle"]})
+            self.assertEqual(staged["sha256"], digest)
+            self.assertTrue(bridge.import_staging_handles[staged["staged_handle"]]["path"].endswith(".ready"))
+            self.assertEqual(Path(bridge.import_staging_handles[staged["staged_handle"]]["path"]).read_bytes(), payload)
+            with self.assertRaises(BridgeMethodError) as reused:
+                bridge.dispatch("finalize_import_attachment", {"upload_handle": begin["upload_handle"]})
+            self.assertEqual(reused.exception.code, "STAGING_HANDLE_INVALID")
+            bad = bridge.dispatch("begin_import_attachment", {"filename": "bad.epub", "size_bytes": 1, "sha256": "0" * 64})
+            bridge.dispatch("append_import_attachment", {"upload_handle": bad["upload_handle"], "content_base64": "eA=="})
+            with self.assertRaises(BridgeMethodError) as mismatch:
+                bridge.dispatch("finalize_import_attachment", {"upload_handle": bad["upload_handle"]})
+            self.assertEqual(mismatch.exception.code, "STAGING_UPLOAD_CONFLICT")
+
+    def test_chunked_attachment_incomplete_finalization_removes_part_file(self):
+        gui = FakeGui()
+        payload = b"expected payload"
+        with tempfile.TemporaryDirectory() as root:
+            bridge = CalibreRpcBridge(gui, import_staging_root=root, import_staging_max_bytes=128, import_staging_ttl_seconds=60)
+            begin = bridge.dispatch("begin_import_attachment", {
+                "filename": "incomplete.epub", "size_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            })
+            bridge.dispatch("append_import_attachment", {
+                "upload_handle": begin["upload_handle"],
+                "content_base64": base64.b64encode(payload[:4]).decode(),
+            })
+            with self.assertRaises(BridgeMethodError) as incomplete:
+                bridge.dispatch("finalize_import_attachment", {"upload_handle": begin["upload_handle"]})
+            self.assertEqual(incomplete.exception.code, "STAGING_UPLOAD_INCOMPLETE")
+            self.assertFalse(list(Path(root).iterdir()))
+
+    def test_attachment_staging_can_queue_a_native_book_import(self):
+        gui = FakeGui()
+        with tempfile.TemporaryDirectory() as root:
+            bridge = CalibreRpcBridge(
+                gui, import_staging_root=root,
+                import_adapter=lambda path, fmt: FakeMetadata("Staged", ["Writer"]),
+                threaded_job_factory=self.threaded_job_factory,
+            )
+            staged = bridge.dispatch("stage_import_attachment", {"filename": "staged.epub", "content_base64": "bmV3IGVwdWI="})
+            queued = bridge.dispatch("add_book", {"staged_handle": staged["staged_handle"], "duplicate_policy": "reject"})
+            self.assertEqual(queued["status"], "queued")
+            gui.job_manager.jobs[-1].execute()
+            done = bridge.dispatch("get_job_status", {"job_id": queued["id"]})
+            self.assertEqual(done["status"], "completed")
+            self.assertFalse(list(Path(root).glob("*.epub")))
+            self.assertFalse(list(Path(root).glob("*.ready")))
+            self.assertFalse(list(Path(root).glob("*.ready")))
+
+    def test_scheduled_news_lists_configured_recipes_and_queues_native_scheduler(self):
+        gui = FakeGui(with_news=True)
+        bridge = CalibreRpcBridge(gui)
+        listed = bridge.dispatch("list_scheduled_news", {})
+        self.assertEqual(listed["items"][0]["urn"], "custom:1000")
+        self.assertEqual(listed["items"][0]["keep_issues"], 4)
+        queued = bridge.dispatch("download_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(queued["result"]["native_pipeline"], "FetchNewsAction/Scheduler/add_news")
+        self.assertEqual(queued["calibre_job_id"], 1)
+        with self.assertRaises(BridgeMethodError) as conflict:
+            bridge.dispatch("download_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(conflict.exception.code, "NEWS_QUEUE_CONFLICT")
+        with self.assertRaises(BridgeMethodError) as absent:
+            bridge.dispatch("download_scheduled_news", {"urn": "builtin:economist"})
+        self.assertEqual(absent.exception.code, "NEWS_NOT_SCHEDULED")
+
+    def test_scheduled_news_fails_closed_without_calibre_scheduler(self):
+        bridge = CalibreRpcBridge(FakeGui())
+        with self.assertRaises(BridgeMethodError) as caught:
+            bridge.dispatch("list_scheduled_news", {})
+        self.assertEqual(caught.exception.code, "NEWS_SCHEDULER_UNAVAILABLE")
 
     def test_add_format_confines_paths_and_preserves_replacement_on_failure(self):
         gui = FakeGui()

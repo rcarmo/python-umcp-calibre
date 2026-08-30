@@ -19,6 +19,7 @@ Read-only discovery is small on purpose. Agents should start with `capabilities_
 * `find_duplicates_readonly(library="current", limit=100, target_limit=100, cursor="")` compares one bounded source/target segment through Calibre's 9.12 `new_api.all_book_ids()` enumeration. Continue with the opaque cursor to cover pairs that span chunk boundaries.
 * `find_cross_library_duplicates_readonly(source_library, target_libraries, limit=5, target_limit=100, cursor="")` compares one bounded source/target segment by normalized identifiers and title/authors without switching the visible GUI library. Partial responses include progress fields and an opaque `next_cursor`.
 * `content_server_status_readonly()` reports only an existing authenticated content-server base URL, and only when the bind is concrete enough to be honest about.
+* `list_scheduled_news_readonly()` reports configured `builtin:`/`custom:` scheduled recipes, their schedule, last-download marker, retention, tags and title-tag setting—never recipe source, account credentials or downloaded content.
 * `list_bridge_jobs_readonly()` and `get_bridge_job_status_readonly(job_id)` expose the bridge's own job and audit records.
 
 Quality inspection never returns absolute paths or ebook text. EPUB work is bounded to 64 MiB files, 4096 archive entries, 256 MiB expanded data, 8 MiB of content scanning and five seconds. Direct inspection calls return stable errors for unsupported, unavailable, unreadable, oversized or timed-out formats. Quality assessment and comparison instead degrade safe inspection failures into penalized normal results with `inspection_errors`, so one malformed candidate cannot abort duplicate triage.
@@ -33,10 +34,12 @@ Mutations appear only when all four conditions hold:
 Once that gate opens, `capabilities_mutation()` advertises the current mutators:
 
 * `update_book_metadata_mutation(book_id, changes)` supports `title`, `authors`, `series`, `series_index`, `tags`, `identifiers`, `publisher`, `language`, `languages`, `comments`, `rating`, `pubdate`, `timestamp`, and custom columns via `custom` or `#column_name`.
-* `add_book_format_mutation(book_id, path, format="", replace=False)` imports one format from a configured import root.
+* `begin_import_attachment_mutation(filename, size_bytes, sha256, format="")`, `append_import_attachment_mutation(upload_handle, content_base64)` and `finalize_import_attachment_mutation(upload_handle)` provide bounded, checksum-verified chunked attachment ingestion into a UI-configured staging root. Finalisation returns a one-time, short-lived opaque handle. `stage_import_attachment_mutation(...)` is the small-attachment convenience form. Staging does not change the library, but it is subject to the mutation gate and accepts the same optional active-library guards.
+* `add_book_format_mutation(book_id, path="", staged_handle="", format="", replace=False)` imports one format from a configured import root or consumes exactly one staged attachment handle.
 * `delete_book_format_mutation(book_id, format, allow_last_format=False)` removes one explicit format; deleting the final remaining format needs `allow_last_format=true`.
 * `set_book_cover_mutation(book_id, path="", remove=False)` replaces or removes the cover from a configured import root.
-* `add_book_mutation(path, format="", duplicate_policy="reject")` imports one book through a native `ThreadedJob`; `duplicate_policy` is `reject`, `skip`, or `add`.
+* `add_book_mutation(path="", staged_handle="", format="", duplicate_policy="reject")` imports one book through a native `ThreadedJob`; it accepts exactly one configured-root path or staged handle, and `duplicate_policy` is `reject`, `skip`, or `add`.
+* `download_scheduled_news_mutation(urn)` starts exactly one already-configured `builtin:` or `custom:` scheduled recipe through Calibre's own `FetchNewsAction`/`Scheduler` flow. Its native job performs `add_news`, retention, sync and configured e-mail handling; it does not run `ebook-convert` directly. One active job per URN is permitted, and completed or failed job records retain a redacted native-log excerpt of at most 4,000 characters.
 * `delete_books_mutation(book_ids, dry_run=True, confirmation="", permanent=False)` previews first, then moves confirmed books to Calibre trash. `permanent=true` is rejected.
 * `merge_duplicates_mutation(survivor_id, source_ids, confirmation, replace_cover=False, save_alternate_cover=False)` keeps the source records, adds only missing formats to the survivor, and runs Calibre's conservative metadata merge.
 * `convert_book_mutation(book_id, output_format, replace_existing=False, options={}, store_result=True, export_path="", overwrite_export=False)` queues one native conversion job. Supported `options` keys are `base_font_size`, `font_size_mapping`, `line_height`, `margin_top`, `margin_right`, `margin_bottom`, `margin_left`, `output_profile`, `input_encoding`, `remove_paragraph_spacing`, `insert_blank_line`, `chapter`, `chapter_mark`, `page_breaks_before`, and `pretty_print`.
@@ -51,7 +54,8 @@ Every mutation that depends on the active library also accepts optional `expecte
 
 ## Boundaries That Matter
 
-* Import, format-replacement and cover paths must live under UI-configured import roots. Exports must stay under UI-configured export roots. Cross-library copy and move destinations use registry aliases marked as copy destinations; raw allowlisted paths remain an internal one-release compatibility path. E-mail can only use Calibre-configured recipients plus the formats enabled for those recipients.
+* Import, format-replacement and cover paths must live under UI-configured import roots. Attachment staging is separately opt-in: the UI-configured staging root has a 1 byte–1 GiB size ceiling, a 60-second–24-hour handle expiry, base64-decoded chunks capped at 8 MiB, SHA-256 verification and one-time handles. Exports must stay under UI-configured export roots. Cross-library copy and move destinations use registry aliases marked as copy destinations; raw allowlisted paths remain an internal one-release compatibility path. E-mail can only use Calibre-configured recipients plus the formats enabled for those recipients.
+* Scheduled-news execution only accepts a currently registered recipe URN and rejects duplicate active URNs. It enters Calibre through the existing Fetch News scheduler, not a new downloader or direct library mutation.
 * Inactive reads use Calibre's `GuiLibraryBroker` secondary handles. The bridge never opens `metadata.db` directly and never switches the visible library as a side effect of a read.
 * Library aliases match `^[a-z][a-z0-9_-]{0,63}$`. Registry paths and Calibre library identities remain private, and an identity mismatch fails closed until the operator reviews the configuration.
 * `content_server_status_readonly()` reports only a concrete authenticated base URL. If the content server is stopped, auth is disabled, or it listens on a wildcard address such as `0.0.0.0`, the tool withholds the URL rather than inventing one. Temporary public links are not implemented.
@@ -67,7 +71,7 @@ PYTHONPATH=.:src python3 -W error::ResourceWarning -m unittest discover -s tests
 sh plugins/build-plugin.sh
 ```
 
-The build produces `plugins/calibre-umcp-plugin.zip`. It copies `umcp.py` and `umcp_shared.py` from `src/calibre_umcp` into the archive, so the plugin uses the same runtime as the rest of the repository rather than carrying a second protocol implementation.
+The build produces `plugins/calibre-umcp-plugin.zip`. It copies `umcp.py` and `umcp_shared.py` from `src/calibre_umcp` into the archive, so the plugin uses the same runtime as the rest of the repository rather than carrying a second protocol implementation. Release candidate 0.3.0-rc.1 includes µMCP upstream’s v0.2.2 Streamable HTTP runtime (persistent sessions, stricter framing and protocol errors); the later upstream commit was documentation-only at the time of preparation.
 
 ## Installing It
 

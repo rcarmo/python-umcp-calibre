@@ -20,6 +20,9 @@ class BridgeSettings:
     ui_token_configured: bool
     mutations_enabled: bool
     import_roots: tuple[str, ...]
+    import_staging_root: str | None
+    import_staging_max_bytes: int
+    import_staging_ttl_seconds: int
     export_roots: tuple[str, ...]
     destination_libraries: tuple[str, ...]
     library_registry: tuple[dict[str, object], ...]
@@ -37,6 +40,9 @@ def config() -> JSONConfig:
         "token": "",
         "mutations_enabled": False,
         "import_roots": "",
+        "import_staging_root": "",
+        "import_staging_max_bytes": 104857600,
+        "import_staging_ttl_seconds": 3600,
         "export_roots": "",
         "destination_libraries": "",
         "library_registry": "[]",
@@ -126,6 +132,11 @@ def load_settings(environ=None) -> BridgeSettings:
             and (not environment_token or environment_token == ui_token)
         ),
         import_roots=_paths(str(prefs["import_roots"] or "")),
+        import_staging_root=(
+            os.path.realpath(os.path.expanduser(str(prefs["import_staging_root"] or "").strip())) or None
+        ),
+        import_staging_max_bytes=max(1_024, min(int(prefs["import_staging_max_bytes"] or 104857600), 1_073_741_824)),
+        import_staging_ttl_seconds=max(60, min(int(prefs["import_staging_ttl_seconds"] or 3600), 86_400)),
         export_roots=_paths(str(prefs["export_roots"] or "")),
         destination_libraries=_paths(str(prefs["destination_libraries"] or "")),
         library_registry=_library_registry(str(prefs["library_registry"] or "[]")),
