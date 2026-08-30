@@ -61,7 +61,7 @@ The staging tools require the same mutation policy and optional active-library g
 
 `list_scheduled_news_readonly()` reports metadata for recipes already configured in Calibre: URN, title, schedule, last-download marker, issue retention, tags and title-tag setting. It excludes recipe source, account credentials and downloaded content.
 
-`download_scheduled_news_mutation(urn)` accepts only an existing `builtin:` or `custom:` scheduled recipe. One active bridge job per URN is permitted. The bridge queues Calibre's existing `FetchNewsAction` and `Scheduler` path; Calibre's JobManager performs recipe execution, `add_news`, issue retention, sync and configured e-mail handling. A job record includes a redacted, 4,000-character native log excerpt after the native job completes or fails.
+`download_scheduled_news_mutation(urn)` accepts only an existing `builtin:` or `custom:` scheduled recipe. One active bridge job per URN is permitted. The bridge queues Calibre's existing `FetchNewsAction` and `Scheduler` path, then briefly processes queued Qt events because Calibre 9.12 delivers `start_recipe_fetch` asynchronously; it correlates the resulting native job by URN before reporting success. Calibre's JobManager performs recipe execution, `add_news`, issue retention, sync and configured e-mail handling. A job record includes a redacted, 4,000-character native log excerpt after the native job completes or fails.
 
 ## Read-Only Quality Assessment
 

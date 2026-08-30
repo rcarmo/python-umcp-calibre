@@ -1461,6 +1461,55 @@ class CalibreRpcBridge:
         except Exception as exc:
             raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre's scheduled-news configuration could not be read") from exc
 
+    @staticmethod
+    def _scheduled_news_job_for_urn(action, before: set, urn: str):
+        """Return the single newly registered Fetch News job for *urn*, if any.
+
+        Calibre 9.12 connects ``Scheduler.start_recipe_fetch`` to
+        ``FetchNewsAction.download_scheduled_recipe`` with a queued Qt
+        connection.  Consequently ``Scheduler.download()`` can return before
+        the action has added its JobManager job to ``conversion_jobs``.  The
+        caller must therefore process queued events before treating an empty
+        mapping as a failed hand-off.
+        """
+        conversion_jobs = getattr(action, "conversion_jobs", {})
+        created = [job for job in conversion_jobs if job not in before]
+        matching = []
+        for job in created:
+            details = conversion_jobs.get(job)
+            arg = details[2] if isinstance(details, (tuple, list)) and len(details) > 2 else None
+            if isinstance(arg, dict) and str(arg.get("urn") or "") == urn:
+                matching.append(job)
+        if len(matching) == 1:
+            return matching[0]
+        if matching:
+            raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre created more than one scheduled-news job for this recipe")
+        if created:
+            raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre created a scheduled-news job for a different recipe")
+        return None
+
+    def _wait_for_scheduled_news_job(self, action, before: set, urn: str):
+        """Allow Calibre's queued Fetch News signal to register its native job.
+
+        This runs on the GUI thread, uses only the Qt event dispatcher and has
+        a short bounded wait.  It never constructs a downloader or writes the
+        library itself: FetchNewsAction remains responsible for the complete
+        native add_news, retention, sync and mail pipeline.
+        """
+        try:
+            from qt.core import QCoreApplication, QEventLoop
+        except ImportError:
+            return self._scheduled_news_job_for_urn(action, before, urn)
+        deadline = time.monotonic() + 1.0
+        while True:
+            native_job = self._scheduled_news_job_for_urn(action, before, urn)
+            if native_job is not None:
+                return native_job
+            if time.monotonic() >= deadline:
+                return None
+            QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 25)
+            time.sleep(0.01)
+
     def _download_scheduled_news(self, params: dict[str, Any]) -> dict[str, Any]:
         urn = str(params.get("urn") or "").strip()
         if not re.fullmatch(r"(?:builtin|custom):[A-Za-z0-9_.-]+", urn):
@@ -1484,10 +1533,9 @@ class CalibreRpcBridge:
                 started = scheduler.download(urn)
                 if not started:
                     raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre declined the scheduled-news download")
-                created = [job for job in getattr(action, "conversion_jobs", {}) if job not in before]
-                if len(created) != 1:
-                    raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre did not expose exactly one scheduled-news job")
-                native_job = created[0]
+                native_job = self._wait_for_scheduled_news_job(action, before, urn)
+                if native_job is None:
+                    raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre did not register the scheduled-news job after queued event delivery")
             self._news_context[job_id] = {"urn": urn, "title": item["title"]}
             self.calibre_jobs[job_id] = native_job
             return self._update_job(

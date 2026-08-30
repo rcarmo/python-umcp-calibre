@@ -1,6 +1,6 @@
 [project]
 name = "calibre-umcp"
-version = "0.3.0rc1"
+version = "0.3.1"
 description = "Calibre automation MCP server using rcarmo/umcp"
 requires-python = ">=3.10"
 license = { text = "MIT" }

@@ -358,19 +358,43 @@ class FakeScheduler:
         return True
 
 
+class FakeQueuedScheduler(FakeScheduler):
+    """Model Calibre 9.12's queued start_recipe_fetch signal delivery."""
+
+    def __init__(self, action, entries):
+        super().__init__(action, entries)
+        self._pending_urn = None
+
+    def download(self, urn):
+        if urn in self.download_queue:
+            return False
+        self.download_queue.add(urn)
+        self._pending_urn = urn
+        return True
+
+    def deliver_pending(self):
+        urn, self._pending_urn = self._pending_urn, None
+        if urn is None:
+            return
+        job = FakeNativeJob(len(self.action.gui.job_manager.jobs) + 1, lambda _job: None, f"Fetch {urn}")
+        self.action.gui.job_manager.jobs.append(job)
+        self.action.conversion_jobs[job] = ((), "EPUB", {"urn": urn})
+
+
 class FakeFetchNewsAction:
-    def __init__(self, gui):
+    def __init__(self, gui, queued=False):
         self.gui = gui
         self.conversion_jobs = {}
-        self.scheduler = FakeScheduler(self, [FakeScheduledRecipe("custom:1000", "Scheduled Economist")])
+        scheduler_class = FakeQueuedScheduler if queued else FakeScheduler
+        self.scheduler = scheduler_class(self, [FakeScheduledRecipe("custom:1000", "Scheduled Economist")])
 
 
 class FakeGui:
-    def __init__(self, job_manager=None, with_news=False):
+    def __init__(self, job_manager=None, with_news=False, queued_news=False):
         self.current_db = FakeDb()
         self.library_view = FakeView()
         self.job_manager = job_manager or FakeJobManager()
-        self.iactions = {"Fetch News": FakeFetchNewsAction(self)} if with_news else {}
+        self.iactions = {"Fetch News": FakeFetchNewsAction(self, queued=queued_news)} if with_news else {}
 
 
 class CalibreRpcBridgeTests(unittest.TestCase):
@@ -1064,6 +1088,21 @@ class CalibreRpcBridgeTests(unittest.TestCase):
         with self.assertRaises(BridgeMethodError) as absent:
             bridge.dispatch("download_scheduled_news", {"urn": "builtin:economist"})
         self.assertEqual(absent.exception.code, "NEWS_NOT_SCHEDULED")
+
+    def test_scheduled_news_waits_for_queued_calibre_signal_delivery(self):
+        gui = FakeGui(with_news=True, queued_news=True)
+        bridge = CalibreRpcBridge(gui)
+        scheduler = gui.iactions["Fetch News"].scheduler
+
+        def wait_for_native_job(action, before, urn):
+            scheduler.deliver_pending()
+            return bridge._scheduled_news_job_for_urn(action, before, urn)
+
+        bridge._wait_for_scheduled_news_job = wait_for_native_job
+        queued = bridge.dispatch("download_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(queued["calibre_job_id"], 1)
+        self.assertIn(queued["id"], bridge.calibre_jobs)
 
     def test_scheduled_news_fails_closed_without_calibre_scheduler(self):
         bridge = CalibreRpcBridge(FakeGui())
