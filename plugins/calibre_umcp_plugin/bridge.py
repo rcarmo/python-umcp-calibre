@@ -1468,8 +1468,11 @@ class CalibreRpcBridge:
 
     @staticmethod
     def _scheduled_news_item(model, urn: str, entry=None, disabled=None) -> dict[str, Any] | None:
-        recipe = model.recipe_from_urn(urn) or {}
-        if not recipe:
+        # Calibre returns an XML element here. A recipe element has no child
+        # nodes and therefore has a false boolean value; test its identity,
+        # not truthiness, so a valid live recipe is never mistaken for absent.
+        recipe = model.recipe_from_urn(urn)
+        if recipe is None:
             return None
         schedule_info = model.schedule_info_from_urn(urn)
         customization = model.get_customize_info(urn)
@@ -1502,7 +1505,10 @@ class CalibreRpcBridge:
         if scheduler is None or model is None:
             raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre's Fetch News scheduler is not available")
         try:
-            scheduled_by_urn = {str(entry.get("id") or ""): entry for entry in model.scheduler_config.iter_recipes()}
+            scheduled_by_urn = {
+                str(entry.get("id") or ""): entry
+                for entry in model.scheduler_config.iter_recipes()
+            }
             urns = set(scheduled_by_urn) | set(self._scheduled_news_disabled)
             items = []
             for urn in sorted(urns):

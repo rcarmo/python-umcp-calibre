@@ -1108,6 +1108,28 @@ class CalibreRpcBridgeTests(unittest.TestCase):
             bridge.dispatch("download_scheduled_news", {"urn": "builtin:economist"})
         self.assertEqual(absent.exception.code, "NEWS_NOT_SCHEDULED")
 
+    def test_scheduled_news_item_accepts_childless_calibre_recipe_element(self):
+        class ChildlessRecipe:
+            def get(self, field, default=None):
+                return {"title": "The Economist"}.get(field, default)
+
+            def __bool__(self):
+                return False
+
+        class Model:
+            def recipe_from_urn(self, urn):
+                return ChildlessRecipe() if urn == "custom:1000" else None
+
+            def schedule_info_from_urn(self, urn):
+                return ["days_of_week", [[4], 10, 0]]
+
+            def get_customize_info(self, urn):
+                return types.SimpleNamespace(keep_issues=0, custom_tags=(), add_title_tag=True)
+
+        item = CalibreRpcBridge._scheduled_news_item(Model(), "custom:1000")
+        self.assertEqual(item["title"], "The Economist")
+        self.assertTrue(item["enabled"])
+
     def test_scheduled_news_disable_uses_native_model_and_retains_discovery_state(self):
         gui = FakeGui(with_news=True)
         saved_states = []
