@@ -39,6 +39,7 @@ class CalibrePluginMCPServer(MCPServer):
         "stage_import_attachment_mutation",
         "download_scheduled_news_mutation",
         "update_scheduled_news_schedule_mutation",
+        "disable_scheduled_news_mutation",
         "add_book_mutation",
         "delete_books_mutation",
         "merge_duplicates_mutation",
@@ -78,12 +79,24 @@ class CalibrePluginMCPServer(MCPServer):
             import_staging_root=getattr(policy, "import_staging_root", None),
             import_staging_max_bytes=int(getattr(policy, "import_staging_max_bytes", 104857600) or 104857600),
             import_staging_ttl_seconds=int(getattr(policy, "import_staging_ttl_seconds", 3600) or 3600),
+            scheduled_news_disabled=getattr(policy, "scheduled_news_disabled", {}),
+            scheduled_news_disabled_save_adapter=(
+                self._save_disabled_scheduled_news if policy is not None else None
+            ),
             export_roots=tuple(getattr(policy, "export_roots", ()) or ()),
             destination_libraries=tuple(getattr(policy, "destination_libraries", ()) or ()),
             library_registry=tuple(getattr(policy, "library_registry", ()) or ()),
             library_switching_enabled=bool(getattr(policy, "library_switching_enabled", False)),
             content_server_advertised_host=str(getattr(policy, "content_server_advertised_host", "") or ""),
         )
+
+    @staticmethod
+    def _save_disabled_scheduled_news(value: dict[str, dict[str, object]]) -> None:
+        try:
+            from .config import save_disabled_scheduled_news
+        except ImportError:
+            from calibre_plugins.calibre_umcp_plugin.config import save_disabled_scheduled_news
+        save_disabled_scheduled_news(value)
 
     def get_config(self) -> dict[str, Any]:
         config = super().get_config()
@@ -151,6 +164,7 @@ class CalibrePluginMCPServer(MCPServer):
                 {"name": "stage_import_attachment_mutation", "summary": "Stage one small bounded attachment and return a short-lived opaque import handle."},
                 {"name": "download_scheduled_news_mutation", "summary": "Queue one existing configured recipe through Calibre's native Fetch News scheduler."},
                 {"name": "update_scheduled_news_schedule_mutation", "summary": "Change one existing recipe schedule through Calibre's native RecipeModel with verification and rollback."},
+                {"name": "disable_scheduled_news_mutation", "summary": "Disable one recipe recurrence through Calibre's native RecipeModel while retaining recipe data."},
                 {"name": "add_book_mutation", "summary": "Queue a confined book import from a configured path or staged handle."},
                 {"name": "delete_books_mutation", "summary": "Dry-run then move confirmed books to Calibre trash."},
                 {"name": "merge_duplicates_mutation", "summary": "Merge missing formats and metadata into an explicit survivor while retaining sources."},
@@ -215,7 +229,7 @@ class CalibrePluginMCPServer(MCPServer):
             "find_duplicates_readonly": {"arguments": {"limit": "source chunk, default 100, max 500", "target_limit": "comparison chunk, default 100, max 500", "library": "configured alias or current", "cursor": "opaque continuation"}, "returns": "one bounded pair-comparison segment with progress and next_cursor"},
             "find_cross_library_duplicates_readonly": {"arguments": {"source_library": "configured alias", "target_libraries": "one to sixteen configured aliases", "source_query": "optional Calibre query", "limit": "source chunk, default 5, max 25", "target_limit": "target chunk, default 100, max 250", "candidate_limit_per_book": "default 20, max 100", "cursor": "opaque continuation"}, "returns": "one bounded target segment, progress fields, partial matches and next_cursor"},
             "content_server_status_readonly": {"arguments": {}, "returns": "running/auth status and a base URL only for authenticated concrete binds"},
-            "list_scheduled_news_readonly": {"arguments": {}, "returns": "configured builtin:/custom: scheduled recipes with schedule, last-download and retention metadata; never account credentials"},
+            "list_scheduled_news_readonly": {"arguments": {}, "returns": "configured and bridge-disabled builtin:/custom: recipes with enabled state, schedule, retained prior schedule, last-download and retention metadata; never account credentials"},
             "list_bridge_jobs_readonly": {"arguments": {}},
             "get_bridge_job_status_readonly": {"arguments": {"job_id": "bridge audit id"}},
         }
@@ -252,6 +266,10 @@ class CalibrePluginMCPServer(MCPServer):
             "update_scheduled_news_schedule_mutation": {
                 "arguments": {"urn": "exact existing builtin: or custom: scheduled recipe", "days_of_week": "one to seven unique indexes, Monday=0 through Sunday=6", "hour": "local hour 0 through 23", "minute": "minute 0 through 59", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
                 "returns": "completed bridge job after native RecipeModel update, live verification and preservation checks",
+            },
+            "disable_scheduled_news_mutation": {
+                "arguments": {"urn": "exact existing builtin: or custom: recipe", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
+                "returns": "completed bridge job with prior schedule and changed=false when the known recipe is already disabled",
             },
             "delete_book_format_mutation": {
                 "arguments": {"book_id": "integer Calibre id", "format": "explicit extension", "allow_last_format": "required for final format", "expected_active_library": "optional current alias guard", "expected_active_generation": "optional generation guard from discovery"},
@@ -590,6 +608,22 @@ class CalibrePluginMCPServer(MCPServer):
             "update_scheduled_news_schedule",
             self._with_active_guards(
                 {"urn": urn, "days_of_week": days_of_week, "hour": hour, "minute": minute},
+                expected_active_library=expected_active_library,
+                expected_active_generation=expected_active_generation,
+            ),
+        )
+
+    def tool_disable_scheduled_news_mutation(
+        self,
+        urn: str,
+        expected_active_library: str | None = None,
+        expected_active_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """Disable one recipe's future recurrence through Calibre's native RecipeModel."""
+        return self._call_mutation(
+            "disable_scheduled_news",
+            self._with_active_guards(
+                {"urn": urn},
                 expected_active_library=expected_active_library,
                 expected_active_generation=expected_active_generation,
             ),

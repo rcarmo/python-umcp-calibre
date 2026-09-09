@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 
 BRIDGE_VERSION = PLUGIN_VERSION_STRING
 SCHEMA_VERSION = 2
-TOOLSET_VERSION = 7
+TOOLSET_VERSION = 8
 SUPPORTED_CALIBRE_MUTATION_VERSION = (9, 12, 0)
 MAX_MUTATION_BATCH = 100
 SUPPORTED_STAGED_IMPORT_FORMATS = frozenset({"AZW3", "CBR", "CBZ", "DOCX", "EPUB", "FB2", "HTML", "KEPUB", "MOBI", "ODT", "PDF", "PRC", "RTF", "TXT"})
@@ -89,6 +89,7 @@ STABLE_MUTATION_ERRORS = frozenset({
     "STAGING_UPLOAD_INCOMPLETE",
     "STAGING_UPLOAD_CONFLICT",
     "NEWS_NOT_SCHEDULED",
+    "NEWS_RECIPE_UNKNOWN",
     "NEWS_QUEUE_CONFLICT",
     "NEWS_SCHEDULER_UNAVAILABLE",
 })
@@ -133,6 +134,8 @@ class CalibreRpcBridge:
         email_send_adapter=None,
         scheduled_news_list_adapter=None,
         scheduled_news_queue_adapter=None,
+        scheduled_news_disabled=(),
+        scheduled_news_disabled_save_adapter=None,
     ):
         self.gui = gui
         self.token = token
@@ -162,6 +165,8 @@ class CalibreRpcBridge:
         self._email_send_adapter = email_send_adapter
         self._scheduled_news_list_adapter = scheduled_news_list_adapter
         self._scheduled_news_queue_adapter = scheduled_news_queue_adapter
+        self._scheduled_news_disabled_save_adapter = scheduled_news_disabled_save_adapter
+        self._scheduled_news_disabled = self._normalise_disabled_scheduled_news(scheduled_news_disabled)
         self._conversion_context: dict[str, dict[str, Any]] = {}
         self._news_context: dict[str, dict[str, Any]] = {}
         self._import_context: dict[str, dict[str, Any]] = {}
@@ -238,7 +243,7 @@ class CalibreRpcBridge:
     def dispatch(self, method: str, params: dict[str, Any]) -> Any:
         if method in {
             "update_book_metadata", "add_book_format", "delete_book_format", "set_book_cover",
-            "update_scheduled_news_schedule", "add_book", "delete_books", "merge_duplicates", "convert_book",
+            "update_scheduled_news_schedule", "disable_scheduled_news", "add_book", "delete_books", "merge_duplicates", "convert_book",
             "copy_books_to_library", "move_books_to_library", "save_book_to_disk", "email_book",
         }:
             self._require_active_guards(params)
@@ -293,6 +298,8 @@ class CalibreRpcBridge:
             return self._download_scheduled_news(params)
         if method == "update_scheduled_news_schedule":
             return self._update_scheduled_news_schedule(params)
+        if method == "disable_scheduled_news":
+            return self._disable_scheduled_news(params)
         if method == "add_book":
             return self._add_book(params)
         if method == "delete_books":
@@ -1431,6 +1438,61 @@ class CalibreRpcBridge:
 
         return self._run_short_mutation("update_book_metadata", params, operation)
 
+    @staticmethod
+    def _normalise_disabled_scheduled_news(value: Any) -> dict[str, dict[str, Any]]:
+        if not isinstance(value, dict):
+            return {}
+        saved: dict[str, dict[str, Any]] = {}
+        for urn, item in value.items():
+            if not isinstance(urn, str) or not re.fullmatch(r"(?:builtin|custom):[A-Za-z0-9_.-]+", urn):
+                continue
+            if not isinstance(item, dict):
+                continue
+            schedule_type = item.get("schedule_type")
+            schedule = item.get("schedule")
+            if isinstance(schedule_type, str) and isinstance(schedule, (list, tuple)):
+                saved[urn] = {
+                    "schedule_type": schedule_type,
+                    "schedule": copy.deepcopy(list(schedule)),
+                    "last_downloaded": str(item.get("last_downloaded") or ""),
+                }
+        return saved
+
+    def _save_disabled_scheduled_news(self) -> None:
+        if self._scheduled_news_disabled_save_adapter is None:
+            return
+        try:
+            self._scheduled_news_disabled_save_adapter(copy.deepcopy(self._scheduled_news_disabled))
+        except Exception as exc:
+            raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre could not persist disabled scheduled-news state") from exc
+
+    @staticmethod
+    def _scheduled_news_item(model, urn: str, entry=None, disabled=None) -> dict[str, Any] | None:
+        recipe = model.recipe_from_urn(urn) or {}
+        if not recipe:
+            return None
+        schedule_info = model.schedule_info_from_urn(urn)
+        customization = model.get_customize_info(urn)
+        if entry is None:
+            entry = {}
+        if disabled is None:
+            disabled = {}
+        scheduled = bool(schedule_info)
+        last_downloaded = entry.get("last_downloaded") or disabled.get("last_downloaded") or ""
+        return {
+            "urn": urn,
+            "title": str(recipe.get("title") or entry.get("title") or ""),
+            "enabled": scheduled,
+            "schedule_type": schedule_info[0] if schedule_info else None,
+            "schedule": schedule_info[1] if schedule_info else None,
+            "last_downloaded": str(last_downloaded),
+            "previous_schedule_type": disabled.get("schedule_type") if not scheduled else None,
+            "previous_schedule": disabled.get("schedule") if not scheduled else None,
+            "keep_issues": int(getattr(customization, "keep_issues", 0) or 0),
+            "custom_tags": list(getattr(customization, "custom_tags", ()) or ()),
+            "add_title_tag": bool(getattr(customization, "add_title_tag", False)),
+        }
+
     def _list_scheduled_news(self) -> dict[str, Any]:
         if self._scheduled_news_list_adapter is not None:
             return {"items": self._scheduled_news_list_adapter(self.gui)}
@@ -1440,28 +1502,96 @@ class CalibreRpcBridge:
         if scheduler is None or model is None:
             raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre's Fetch News scheduler is not available")
         try:
-            scheduled = list(model.scheduler_config.iter_recipes())
+            scheduled_by_urn = {str(entry.get("id") or ""): entry for entry in model.scheduler_config.iter_recipes()}
+            urns = set(scheduled_by_urn) | set(self._scheduled_news_disabled)
             items = []
-            for entry in scheduled:
-                urn = str(entry.get("id") or "")
-                recipe = model.recipe_from_urn(urn) or {}
-                schedule_info = model.schedule_info_from_urn(urn)
-                customization = model.get_customize_info(urn)
-                items.append({
-                    "urn": urn,
-                    "title": str(recipe.get("title") or entry.get("title") or ""),
-                    "schedule_type": schedule_info[0] if schedule_info else None,
-                    "schedule": schedule_info[1] if schedule_info else None,
-                    "last_downloaded": str(entry.get("last_downloaded") or ""),
-                    "keep_issues": int(getattr(customization, "keep_issues", 0) or 0),
-                    "custom_tags": list(getattr(customization, "custom_tags", ()) or ()),
-                    "add_title_tag": bool(getattr(customization, "add_title_tag", False)),
-                })
+            for urn in sorted(urns):
+                item = self._scheduled_news_item(
+                    model, urn, scheduled_by_urn.get(urn), self._scheduled_news_disabled.get(urn),
+                )
+                if item is not None:
+                    items.append(item)
             return {"items": items}
         except BridgeMethodError:
             raise
         except Exception as exc:
             raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre's scheduled-news configuration could not be read") from exc
+
+    def _require_news_recipe(self, model, urn: str) -> dict[str, Any]:
+        if not re.fullmatch(r"(?:builtin|custom):[A-Za-z0-9_.-]+", urn):
+            raise BridgeMethodError("POLICY_DENIED", "urn must be a configured builtin: or custom: recipe identifier")
+        item = self._scheduled_news_item(model, urn, disabled=self._scheduled_news_disabled.get(urn))
+        if item is None:
+            raise BridgeMethodError("NEWS_RECIPE_UNKNOWN", "The scheduled-news recipe does not exist")
+        return item
+
+    def _scheduled_news_conflict(self, scheduler, urn: str) -> bool:
+        if urn in set(getattr(scheduler, "download_queue", ()) or ()):
+            return True
+        return any(context.get("urn") == urn for context in self._news_context.values())
+
+    def _disable_scheduled_news(self, params: dict[str, Any]) -> dict[str, Any]:
+        urn = str(params.get("urn") or "").strip()
+        action = getattr(self.gui, "iactions", {}).get("Fetch News")
+        scheduler = getattr(action, "scheduler", None)
+        model = getattr(scheduler, "recipe_model", None)
+        if model is None or not callable(getattr(model, "un_schedule_recipe", None)):
+            raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre's Fetch News scheduler is not available")
+        scheduled_entries = {
+            str(entry.get("id") or ""): entry
+            for entry in model.scheduler_config.iter_recipes()
+        }
+        before = self._scheduled_news_item(
+            model, urn, scheduled_entries.get(urn), self._scheduled_news_disabled.get(urn),
+        )
+        if before is None:
+            if not re.fullmatch(r"(?:builtin|custom):[A-Za-z0-9_.-]+", urn):
+                raise BridgeMethodError("POLICY_DENIED", "urn must be a configured builtin: or custom: recipe identifier")
+            raise BridgeMethodError("NEWS_RECIPE_UNKNOWN", "The scheduled-news recipe does not exist")
+        if self._scheduled_news_conflict(scheduler, urn):
+            raise BridgeMethodError("NEWS_QUEUE_CONFLICT", "This scheduled recipe has an active native Calibre job")
+        if not before["enabled"]:
+            return self._run_short_mutation(
+                "disable_scheduled_news", params,
+                lambda: {
+                    "urn": urn,
+                    "changed": False,
+                    "enabled": False,
+                    "previous_schedule": copy.deepcopy(self._scheduled_news_disabled.get(urn)),
+                },
+            )
+        prior = {
+            "schedule_type": before["schedule_type"],
+            "schedule": copy.deepcopy(before["schedule"]),
+            "last_downloaded": before["last_downloaded"],
+        }
+
+        disabled_state_before = copy.deepcopy(self._scheduled_news_disabled)
+
+        def operation():
+            try:
+                model.un_schedule_recipe(urn)
+                after = self._require_news_recipe(model, urn)
+                if after["enabled"]:
+                    raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre did not remove the scheduled-news recurrence")
+                self._scheduled_news_disabled[urn] = prior
+                self._save_disabled_scheduled_news()
+                return {"urn": urn, "changed": True, "enabled": False, "previous_schedule": prior}
+            except Exception as exc:
+                try:
+                    if not self._require_news_recipe(model, urn)["enabled"]:
+                        model.schedule_recipe(urn, prior["schedule_type"], prior["schedule"])
+                    self._scheduled_news_disabled = disabled_state_before
+                    self._save_disabled_scheduled_news()
+                except Exception as rollback_exc:
+                    raise BridgeMethodError(
+                        "NEWS_SCHEDULER_UNAVAILABLE", f"Scheduled-news disable failed and rollback failed: {rollback_exc}",
+                    ) from exc
+                if isinstance(exc, BridgeMethodError):
+                    raise
+                raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre could not disable the scheduled-news recurrence") from exc
+
+        return self._run_short_mutation("disable_scheduled_news", params, operation)
 
     def _update_scheduled_news_schedule(self, params: dict[str, Any]) -> dict[str, Any]:
         urn = str(params.get("urn") or "").strip()
@@ -1489,6 +1619,8 @@ class CalibreRpcBridge:
         before = next((entry for entry in self._list_scheduled_news()["items"] if entry["urn"] == urn), None)
         if before is None:
             raise BridgeMethodError("NEWS_NOT_SCHEDULED", "Only an existing configured scheduled recipe may be changed")
+        if not before.get("enabled"):
+            raise BridgeMethodError("NEWS_NOT_SCHEDULED", "The scheduled-news recipe is disabled")
         previous_type = before.get("schedule_type")
         previous_schedule = before.get("schedule")
         if not previous_type or previous_schedule is None:
@@ -1581,6 +1713,8 @@ class CalibreRpcBridge:
         item = next((entry for entry in scheduled if entry["urn"] == urn), None)
         if item is None:
             raise BridgeMethodError("NEWS_NOT_SCHEDULED", "Only an existing configured scheduled recipe may be started")
+        if not item.get("enabled"):
+            raise BridgeMethodError("NEWS_NOT_SCHEDULED", "The scheduled-news recipe is disabled")
         if any(context.get("urn") == urn for context in self._news_context.values()):
             raise BridgeMethodError("NEWS_QUEUE_CONFLICT", "This scheduled recipe already has an active native Calibre job")
         job_id = self._record_job("download_scheduled_news", {"urn": urn}, "waiting_for_gui", "Queuing configured Calibre scheduled-news recipe")

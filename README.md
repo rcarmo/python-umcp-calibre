@@ -2,7 +2,7 @@
 
 Calibre keeps its database, caches and filesystem state in the GUI process. `python-umcp-calibre` runs an MCP server in that process, so clients use Calibre's APIs and job machinery without opening `metadata.db` from a sidecar.
 
-Version 0.3.2 provides the released plugin and an older read-only compatibility server. Mutations are tested against exactly Calibre 9.12.0; the plugin hides them on every other Calibre version.
+Version 0.3.3 provides the released plugin and an older read-only compatibility server. Mutations are tested against exactly Calibre 9.12.0; the plugin hides them on every other Calibre version.
 
 ## Process boundaries
 
@@ -47,7 +47,7 @@ Start with `capabilities_readonly()`. Read `list_libraries_readonly()` before ch
 | `find_duplicates_readonly` | `library`, `limit`, `target_limit`, `cursor` | One bounded pair-comparison segment |
 | `find_cross_library_duplicates_readonly` | source and target aliases, limits, optional query and cursor | One bounded cross-library comparison segment |
 | `content_server_status_readonly` | None | Authenticated content-server URL when it can be stated unambiguously |
-| `list_scheduled_news_readonly` | None | Recipe URN, schedule, last download and customisation metadata |
+| `list_scheduled_news_readonly` | None | Enabled or bridge-disabled recipe state, schedule, retained prior schedule, last download and customisation metadata |
 | `list_bridge_jobs_readonly` | None | Bridge audit and job records |
 | `get_bridge_job_status_readonly` | `job_id` | One bridge audit or job record |
 
@@ -86,6 +86,7 @@ Metadata, format, cover, recipe-schedule, import, deletion, merge, conversion, c
 | `add_book_mutation` | configured path or staged handle, format, duplicate policy | Queues a native Calibre book import |
 | `download_scheduled_news_mutation` | recipe `urn` | Queues an existing recipe through `FetchNewsAction` and Calibre's scheduler |
 | `update_scheduled_news_schedule_mutation` | `urn`, `days_of_week`, `hour`, `minute` | Changes an existing weekly schedule through `RecipeModel.schedule_recipe()` |
+| `disable_scheduled_news_mutation` | recipe `urn` | Disables future recurrence through `RecipeModel.un_schedule_recipe()` while retaining resume metadata |
 | `delete_books_mutation` | IDs, dry-run flag, confirmation | Previews, then moves confirmed books to Calibre trash |
 | `merge_duplicates_mutation` | survivor ID, source IDs, confirmation, cover options | Adds missing formats and merges metadata while retaining source records |
 | `convert_book_mutation` | book ID, output format, options, result/export policy | Queues a native Calibre conversion job |
@@ -112,7 +113,7 @@ Save-to-disk options are limited to `template`, `formats`, `save_cover`, `write_
 | Library aliases | Must match `^[a-z][a-z0-9_-]{0,63}$`; paths are omitted from MCP results |
 | Copy and move | Destinations use configured aliases marked as copy targets; a move trashes sources after verified copying |
 | Duplicate policies | `reject`, `skip`, `add`, `merge_missing` or `replace`; merge policies require explicit destination IDs |
-| Scheduled news | Only registered `builtin:` or `custom:` URNs; one active job per URN; schedule days use Monday `0` through Sunday `6` |
+| Scheduled news | Only registered `builtin:` or `custom:` URNs; one active job per URN; schedule days use Monday `0` through Sunday `6`; disabling preserves the prior schedule and last-download marker in plugin preferences without changing the recipe, its customisation or library records |
 | E-mail | Recipient and format must already exist in Calibre's mail configuration; automatic conversion is unsupported |
 | Content server | Returns a URL only for a running authenticated server with a concrete or explicitly advertised host |
 | Short mutations | GUI-thread database calls cannot be interrupted after they start |
@@ -121,6 +122,8 @@ Save-to-disk options are limited to `template`, `formats`, `save_cover`, `write_
 | Audit | Optional redacted JSONL file plus 10 to 10,000 in-memory records; default 500 |
 
 `update_scheduled_news_schedule_mutation()` reads the existing schedule, calls Calibre's live recipe model, checks the stored result and verifies that recipe identity, title, last-download marker and customisation fields did not change. It restores the previous schedule if the update or verification fails.
+
+`disable_scheduled_news_mutation()` calls Calibre's live `RecipeModel.un_schedule_recipe()` on the GUI thread. It refuses a queued or running recipe, verifies that the recipe remains registered and unscheduled, and persists its prior schedule and last-download marker in the plugin preferences. Repeating the request for a known disabled recipe returns `changed=false`; an unknown recipe returns `NEWS_RECIPE_UNKNOWN`. No MCP operation re-enables a recipe in this release.
 
 `content_server_status_readonly()` withholds the URL when the server is stopped, authentication is disabled or a wildcard bind has no advertised host. Its `reason_code` states the failed condition.
 

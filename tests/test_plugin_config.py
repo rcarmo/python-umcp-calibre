@@ -76,6 +76,14 @@ class PluginConfigTests(unittest.TestCase):
         self.assertTrue(settings.ui_token_configured)
         self.assertFalse(settings.mutations_enabled)
 
+    def test_disabled_scheduled_news_state_is_loaded_and_saved(self):
+        prefs = self.config_module.config()
+        prefs["scheduled_news_disabled"] = '{"custom:1000":{"schedule_type":"days_of_week","schedule":[[4],10,0],"last_downloaded":"2026-09-01T10:00:00Z"}}'
+        settings = self.config_module.load_settings(environ={})
+        self.assertEqual(settings.scheduled_news_disabled["custom:1000"]["schedule"], [[4], 10, 0])
+        self.config_module.save_disabled_scheduled_news(settings.scheduled_news_disabled)
+        self.assertIn('"custom:1000"', prefs["scheduled_news_disabled"])
+
     def test_library_registry_is_normalised_and_switching_is_separate_policy(self):
         prefs = self.config_module.config()
         prefs["library_registry"] = '[{"alias":"main","label":"Main","path":"~/Books","read":true,"switch":true}]'
