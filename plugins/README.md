@@ -59,11 +59,13 @@ The staging tools require the same mutation policy and optional active-library g
 
 ## Scheduled News
 
-`list_scheduled_news_readonly()` reports metadata for recipes already configured in Calibre: URN, title, schedule, last-download marker, issue retention, tags and title-tag setting. It excludes recipe source, account credentials and downloaded content.
+`list_scheduled_news_readonly()` reports metadata for configured and bridge-disabled recipes: URN, title, enabled state, current or retained prior schedule, last-download marker, issue retention, tags and title-tag setting. It excludes recipe source, account credentials and downloaded content.
 
 `download_scheduled_news_mutation(urn)` accepts only an existing `builtin:` or `custom:` scheduled recipe. One active bridge job per URN is permitted. The bridge queues Calibre's existing `FetchNewsAction` and `Scheduler` path, then briefly processes queued Qt events because Calibre 9.12 delivers `start_recipe_fetch` asynchronously; it correlates the resulting native job by URN before reporting success. Calibre's JobManager performs recipe execution, `add_news`, issue retention, sync and configured e-mail handling. A job record includes a redacted, 4,000-character native log excerpt after the native job completes or fails.
 
 `update_scheduled_news_schedule_mutation(urn, days_of_week, hour, minute)` changes only an already-configured weekly schedule through the live `RecipeModel.schedule_recipe()` method. Day indexes are Monday `0` through Sunday `6`. The bridge verifies the resulting live schedule and unchanged identity, last-download and customization metadata, rolling the schedule back if verification fails.
+
+`disable_scheduled_news_mutation(urn)` disables a known recipe's future recurrence through the running GUI's `RecipeModel.un_schedule_recipe()` method. It rejects queued or running downloads, retains the prior schedule and last-download marker in bridge preferences, and verifies that the recipe remains registered but unscheduled. The recipe source, account data, customisation and existing Calibre books are unchanged. Disabled recipes remain visible through `list_scheduled_news_readonly()` with `enabled=false`, `previous_schedule_type` and `previous_schedule`. Repeating a disable reports `changed=false`; an unknown recipe reports `NEWS_RECIPE_UNKNOWN`. This release does not include a re-enable mutation.
 
 ## Read-Only Quality Assessment
 

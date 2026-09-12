@@ -333,6 +333,8 @@ class FakeRecipeModel:
         self.scheduler_config = FakeSchedulerConfig(entries)
         self.schedule_info = {"custom:1000": ("days_of_week", [[5], 6, 0])}
         self.schedule_calls = []
+        self.un_schedule_calls = []
+        self.fail_un_schedule = False
 
     def recipe_from_urn(self, urn):
         return {"title": "Scheduled Economist"} if urn == "custom:1000" else None
@@ -346,6 +348,14 @@ class FakeRecipeModel:
         normalized = [list(schedule[0]), int(schedule[1]), int(schedule[2])]
         self.schedule_calls.append((urn, schedule_type, normalized))
         self.schedule_info[urn] = (schedule_type, normalized)
+
+    def un_schedule_recipe(self, urn):
+        if urn not in self.schedule_info:
+            raise ValueError("unknown recipe")
+        if self.fail_un_schedule:
+            raise RuntimeError("scheduler write failed")
+        self.un_schedule_calls.append(urn)
+        self.schedule_info.pop(urn)
 
     def get_customize_info(self, urn):
         return SimpleNamespace(keep_issues=4, custom_tags=("News",), add_title_tag=True)
@@ -1097,6 +1107,98 @@ class CalibreRpcBridgeTests(unittest.TestCase):
         with self.assertRaises(BridgeMethodError) as absent:
             bridge.dispatch("download_scheduled_news", {"urn": "builtin:economist"})
         self.assertEqual(absent.exception.code, "NEWS_NOT_SCHEDULED")
+
+    def test_scheduled_news_item_accepts_childless_calibre_recipe_element(self):
+        class ChildlessRecipe:
+            def get(self, field, default=None):
+                return {"title": "The Economist"}.get(field, default)
+
+            def __bool__(self):
+                return False
+
+        class Model:
+            def recipe_from_urn(self, urn):
+                return ChildlessRecipe() if urn == "custom:1000" else None
+
+            def schedule_info_from_urn(self, urn):
+                return ["days_of_week", [[4], 10, 0]]
+
+            def get_customize_info(self, urn):
+                return types.SimpleNamespace(keep_issues=0, custom_tags=(), add_title_tag=True)
+
+        item = CalibreRpcBridge._scheduled_news_item(Model(), "custom:1000")
+        self.assertEqual(item["title"], "The Economist")
+        self.assertTrue(item["enabled"])
+
+    def test_scheduled_news_disable_uses_native_model_and_retains_discovery_state(self):
+        gui = FakeGui(with_news=True)
+        saved_states = []
+        bridge = CalibreRpcBridge(
+            gui,
+            scheduled_news_disabled_save_adapter=lambda value: saved_states.append(value),
+        )
+        before = bridge.dispatch("list_scheduled_news", {})["items"][0]
+        disabled = bridge.dispatch("disable_scheduled_news", {"urn": "custom:1000"})
+        after = bridge.dispatch("list_scheduled_news", {})["items"][0]
+
+        self.assertEqual(disabled["status"], "completed")
+        self.assertTrue(disabled["result"]["changed"])
+        self.assertEqual(disabled["result"]["previous_schedule"], {
+            "schedule_type": "days_of_week", "schedule": [[5], 6, 0],
+            "last_downloaded": "2026-08-30T12:00:00Z",
+        })
+        self.assertEqual(gui.iactions["Fetch News"].scheduler.recipe_model.un_schedule_calls, ["custom:1000"])
+        self.assertFalse(after["enabled"])
+        self.assertEqual(after["previous_schedule"], [[5], 6, 0])
+        self.assertEqual(after["last_downloaded"], before["last_downloaded"])
+        self.assertEqual(after["keep_issues"], before["keep_issues"])
+        self.assertEqual(after["custom_tags"], before["custom_tags"])
+        self.assertTrue(saved_states[0]["custom:1000"])
+
+        repeated = bridge.dispatch("disable_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(repeated["status"], "completed")
+        self.assertFalse(repeated["result"]["changed"])
+        self.assertEqual(repeated["result"]["previous_schedule"], saved_states[0]["custom:1000"])
+        with self.assertRaises(BridgeMethodError) as disabled_download:
+            bridge.dispatch("download_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(disabled_download.exception.code, "NEWS_NOT_SCHEDULED")
+        with self.assertRaises(BridgeMethodError) as disabled_update:
+            bridge.dispatch(
+                "update_scheduled_news_schedule",
+                {"urn": "custom:1000", "days_of_week": [4], "hour": 10, "minute": 0},
+            )
+        self.assertEqual(disabled_update.exception.code, "NEWS_NOT_SCHEDULED")
+
+    def test_scheduled_news_disable_rejects_unknown_or_active_recipe_and_rolls_back(self):
+        gui = FakeGui(with_news=True)
+        bridge = CalibreRpcBridge(gui)
+        with self.assertRaises(BridgeMethodError) as unknown:
+            bridge.dispatch("disable_scheduled_news", {"urn": "custom:404"})
+        self.assertEqual(unknown.exception.code, "NEWS_RECIPE_UNKNOWN")
+
+        gui.iactions["Fetch News"].scheduler.download_queue.add("custom:1000")
+        with self.assertRaises(BridgeMethodError) as queued:
+            bridge.dispatch("disable_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(queued.exception.code, "NEWS_QUEUE_CONFLICT")
+        gui.iactions["Fetch News"].scheduler.download_queue.clear()
+
+        gui.iactions["Fetch News"].scheduler.recipe_model.fail_un_schedule = True
+        with self.assertRaises(BridgeMethodError) as failed:
+            bridge.dispatch("disable_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(failed.exception.code, "NEWS_SCHEDULER_UNAVAILABLE")
+        self.assertTrue(bridge.dispatch("list_scheduled_news", {})["items"][0]["enabled"])
+
+        persisted = {"custom:other": {"schedule_type": "days_of_week", "schedule": [[1], 9, 0], "last_downloaded": ""}}
+        saved_states = []
+        bridge = CalibreRpcBridge(
+            FakeGui(with_news=True),
+            scheduled_news_disabled=persisted,
+            scheduled_news_disabled_save_adapter=lambda value: saved_states.append(value),
+        )
+        bridge.gui.iactions["Fetch News"].scheduler.recipe_model.fail_un_schedule = True
+        with self.assertRaises(BridgeMethodError):
+            bridge.dispatch("disable_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(saved_states[-1], persisted)
 
     def test_scheduled_news_schedule_uses_native_model_and_preserves_other_settings(self):
         gui = FakeGui(with_news=True)
