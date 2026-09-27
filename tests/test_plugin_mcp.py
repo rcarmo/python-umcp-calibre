@@ -83,7 +83,7 @@ class PluginMCPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "calibre-umcp")
         self.assertEqual(initialized["result"]["serverInfo"]["schemaVersion"], "2")
-        self.assertEqual(initialized["result"]["serverInfo"]["toolsetVersion"], "8")
+        self.assertEqual(initialized["result"]["serverInfo"]["toolsetVersion"], "9")
         self.assertEqual(initialized["result"]["capabilities"], {"tools": {"listChanged": False}})
 
         _, listed = self.post(base, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
@@ -120,7 +120,7 @@ class PluginMCPTests(unittest.TestCase):
         )
         content = capabilities["result"]["structuredContent"]
         self.assertEqual(content["schema_version"], 2)
-        self.assertEqual(content["toolset_version"], 8)
+        self.assertEqual(content["toolset_version"], 9)
         self.assertFalse(content["cross_library_configured"])
         self.assertFalse(content["cross_library_available"])
         self.assertEqual(content["readable_target_count"], 0)
@@ -244,20 +244,21 @@ class PluginMCPTests(unittest.TestCase):
                 invoke()
             self.assertIn("ACTIVE_LIBRARY_GENERATION_MISMATCH", str(caught.exception))
 
-    def test_mutation_discovery_fails_closed_outside_exact_calibre_9_12_0(self):
+    def test_mutation_discovery_requires_exact_calibre_9_15_0(self):
         calibre = types.ModuleType("calibre")
         calibre.__path__ = []
         constants = types.ModuleType("calibre.constants")
-        constants.numeric_version = (9, 12, 1)
-        with patch.dict(sys.modules, {"calibre": calibre, "calibre.constants": constants}):
-            server = CalibrePluginMCPServer(
-                FakeGui(), token="ui-token", ui_token_configured=True, mutations_enabled=True
-            )
-        self.addCleanup(server.bridge.close)
-        names = {tool["name"] for tool in server.discover_tools()["tools"]}
-        self.assertFalse(server.mutation_runtime_supported)
-        self.assertNotIn("capabilities_mutation", names)
-        self.assertNotIn("update_book_metadata_mutation", names)
+        for version, supported in (((9, 15, 0), True), ((9, 12, 0), False), ((9, 15, 1), False)):
+            constants.numeric_version = version
+            with patch.dict(sys.modules, {"calibre": calibre, "calibre.constants": constants}):
+                server = CalibrePluginMCPServer(
+                    FakeGui(), token="ui-token", ui_token_configured=True, mutations_enabled=True
+                )
+            self.addCleanup(server.bridge.close)
+            names = {tool["name"] for tool in server.discover_tools()["tools"]}
+            self.assertEqual(server.mutation_runtime_supported, supported)
+            self.assertEqual("capabilities_mutation" in names, supported)
+            self.assertEqual("update_book_metadata_mutation" in names, supported)
 
     def test_missing_readonly_job_preserves_stable_error_code(self):
         server = CalibrePluginMCPServer(FakeGui())

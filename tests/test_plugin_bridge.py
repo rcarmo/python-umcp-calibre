@@ -378,7 +378,7 @@ class FakeScheduler:
 
 
 class FakeQueuedScheduler(FakeScheduler):
-    """Model Calibre 9.12's queued start_recipe_fetch signal delivery."""
+    """Model Calibre 9.15's queued start_recipe_fetch signal delivery."""
 
     def __init__(self, action, entries):
         super().__init__(action, entries)
@@ -938,15 +938,20 @@ class CalibreRpcBridgeTests(unittest.TestCase):
             bridge.call_serialized("ping", {})
         self.assertEqual(caught.exception.code, "BRIDGE_SHUTTING_DOWN")
 
-    def test_mutations_fail_closed_outside_exact_calibre_9_12_0(self):
+    def test_mutations_require_exact_calibre_9_15_0(self):
         calibre = types.ModuleType("calibre")
         calibre.__path__ = []
         constants = types.ModuleType("calibre.constants")
-        constants.numeric_version = (9, 12, 1)
-        with patch.dict(sys.modules, {"calibre": calibre, "calibre.constants": constants}):
-            with self.assertRaises(BridgeMethodError) as caught:
-                CalibreRpcBridge(FakeGui())._new_api()
-        self.assertEqual(caught.exception.code, "UNSUPPORTED_BY_CALIBRE_VERSION")
+        for version, supported in (((9, 15, 0), True), ((9, 12, 0), False), ((9, 15, 1), False)):
+            constants.numeric_version = version
+            with patch.dict(sys.modules, {"calibre": calibre, "calibre.constants": constants}):
+                bridge = CalibreRpcBridge(FakeGui())
+                if supported:
+                    self.assertIs(bridge._new_api(), bridge.gui.current_db.new_api)
+                else:
+                    with self.assertRaises(BridgeMethodError) as caught:
+                        bridge._new_api()
+                    self.assertEqual(caught.exception.code, "UNSUPPORTED_BY_CALIBRE_VERSION")
 
     def test_metadata_mutation_updates_supported_fields_and_refreshes(self):
         gui = FakeGui()

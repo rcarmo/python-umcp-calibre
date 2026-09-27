@@ -30,8 +30,8 @@ from urllib.parse import urlparse
 
 BRIDGE_VERSION = PLUGIN_VERSION_STRING
 SCHEMA_VERSION = 2
-TOOLSET_VERSION = 8
-SUPPORTED_CALIBRE_MUTATION_VERSION = (9, 12, 0)
+TOOLSET_VERSION = 9
+SUPPORTED_CALIBRE_MUTATION_VERSION = (9, 15, 0)
 MAX_MUTATION_BATCH = 100
 SUPPORTED_STAGED_IMPORT_FORMATS = frozenset({"AZW3", "CBR", "CBZ", "DOCX", "EPUB", "FB2", "HTML", "KEPUB", "MOBI", "ODT", "PDF", "PRC", "RTF", "TXT"})
 
@@ -1210,14 +1210,14 @@ class CalibreRpcBridge:
         if not mutation_runtime_supported():
             raise BridgeMethodError(
                 "UNSUPPORTED_BY_CALIBRE_VERSION",
-                f"Calibre {'.'.join(map(str, numeric_version))} has not passed the exact 9.12.0 mutation contract tests",
+                f"Calibre {'.'.join(map(str, numeric_version))} has not passed the exact 9.15.0 mutation contract tests",
             )
         api = getattr(self._db(), "new_api", None)
         required = ("has_id", "set_metadata", "format", "add_format", "remove_formats")
         if api is None or any(not callable(getattr(api, name, None)) for name in required):
             raise BridgeMethodError(
                 "UNSUPPORTED_BY_CALIBRE_VERSION",
-                "The active database does not expose the Calibre 9.12 mutation API contract",
+                "The active database does not expose the Calibre 9.15 mutation API contract",
             )
         return api
 
@@ -1666,7 +1666,7 @@ class CalibreRpcBridge:
     def _scheduled_news_job_for_urn(action, before: set, urn: str):
         """Return the single newly registered Fetch News job for *urn*, if any.
 
-        Calibre 9.12 connects ``Scheduler.start_recipe_fetch`` to
+        Calibre 9.15 connects ``Scheduler.start_recipe_fetch`` to
         ``FetchNewsAction.download_scheduled_recipe`` with a queued Qt
         connection.  Consequently ``Scheduler.download()`` can return before
         the action has added its JobManager job to ``conversion_jobs``.  The
@@ -2891,7 +2891,7 @@ class CalibreRpcBridge:
                 return {"ok": False, "code": "BOOK_NOT_FOUND", "message": f"Book {book_id} no longer exists"}
 
             class SaveToDiskDatabaseAdapter:
-                # Calibre 9.12's legacy save_to_disk() dereferences db.new_api,
+                # Calibre 9.15's legacy save_to_disk() dereferences db.new_api,
                 # calls get_metadata(index_is_id=True), then uses Cache-only
                 # helpers such as pref() and copy_format_to(). Keep that mixed
                 # compatibility boundary local to this adapter.
@@ -3693,7 +3693,7 @@ class CalibreRpcBridge:
         job_id = self._record_job(method, params, "rejected", "Obsolete singular copy/move method rejected")
         raise BridgeMethodError(
             "UNSUPPORTED_BY_CALIBRE_VERSION",
-            f"{method} is obsolete; use the verified plural Calibre 9.12 mutation (job_id={job_id})",
+            f"{method} is obsolete; use the verified plural Calibre 9.15 mutation (job_id={job_id})",
         )
 
     def _record_job(self, method: str, params: dict[str, Any], status: str, message: str) -> str:

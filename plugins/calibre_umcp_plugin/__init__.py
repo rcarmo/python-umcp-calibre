@@ -5,7 +5,7 @@ except ImportError:  # Allows unit tests to import bridge modules outside Calibr
         pass
 
 
-PLUGIN_VERSION = (0, 3, 3)
+PLUGIN_VERSION = (0, 3, 4)
 PLUGIN_VERSION_STRING = ".".join(str(part) for part in PLUGIN_VERSION)
 
 
@@ -15,8 +15,8 @@ class CalibreUmcpPlugin(InterfaceActionBase):
     supported_platforms = ["windows", "osx", "linux"]
     author = "Rui Carmo"
     version = PLUGIN_VERSION
-    # The release surface is source-contract tested only against Calibre 9.12.0.
+    # The release surface is source-contract tested only against Calibre 9.15.0.
     # Calibre treats this as a lower bound; bridge mutations separately require
-    # the exact 9.12.0 runtime and fail closed on later releases.
-    minimum_calibre_version = (9, 12, 0)
+    # the exact 9.15.0 runtime and fail closed on other releases.
+    minimum_calibre_version = (9, 15, 0)
     actual_plugin = "calibre_plugins.calibre_umcp_plugin.ui:CalibreUmcpAction"

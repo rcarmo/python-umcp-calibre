@@ -2,7 +2,7 @@
 
 Calibre keeps its database, caches and filesystem state in the GUI process. `python-umcp-calibre` runs an MCP server in that process, so clients use Calibre's APIs and job machinery without opening `metadata.db` from a sidecar.
 
-Version 0.3.3 provides the released plugin and an older read-only compatibility server. Mutations are tested against exactly Calibre 9.12.0; the plugin hides them on every other Calibre version.
+Version 0.3.4 provides the released plugin and an older read-only compatibility server. Mutations are tested against exactly Calibre 9.15.0; the plugin hides them on every other Calibre version.
 
 ## Process boundaries
 
@@ -61,7 +61,7 @@ Duplicate searches are segmented. Pass `next_cursor` back unchanged with the sam
 
 | Condition | Required state |
 |---|---|
-| Calibre runtime | Exactly 9.12.0 |
+| Calibre runtime | Exactly 9.15.0 |
 | UI token | Saved in the plugin configuration |
 | Mutation setting | **Enable implemented mutation tools** checked in the plugin UI |
 | Environment override | `CALIBRE_UMCP_BRIDGE_TOKEN`, when set, matches the saved UI token |
@@ -203,7 +203,7 @@ Legacy mutator names such as `convert_book`, `copy_book`, `move_book_destructive
 | [Architecture](docs/architecture.md) | Process and trust boundaries |
 | [Design](docs/design.md) | Implementation choices |
 | [Multiple libraries](docs/multiple-libraries.md) | Alias discovery, brokered reads, switching and duplicate checks |
-| [Calibre 9.12 API map](docs/calibre-9.12-api-map.md) | Audited read and mutation APIs |
+| [Calibre 9.15 API map](docs/calibre-9.15-api-map.md) | Audited read and mutation APIs |
 | [Plugin README](plugins/README.md) | ZIP contents and container installation |
 
 The project is released under the [MIT licence](LICENSE).

@@ -268,7 +268,7 @@ Messages never contain configured paths, database filenames or exception text th
 
 ## Fixing the current duplicate failure
 
-The active-library bug is independent of this design. `_find_duplicates()` currently calls `all_book_ids()` on the legacy database wrapper, while the Calibre 9.12 read contract should consistently use the resolved database's `new_api`. The fix belongs in the first implementation slice, with a runtime regression test and a structured bridge error if ID enumeration fails.
+The active-library bug is independent of this design. `_find_duplicates()` currently calls `all_book_ids()` on the legacy database wrapper, while the Calibre 9.15 read contract should consistently use the resolved database's `new_api`. The fix belongs in the first implementation slice, with a runtime regression test and a structured bridge error if ID enumeration fails.
 
 The current key also requires identifiers, title and authors to match simultaneously. That finds exact metadata clones rather than probable duplicates. The replacement groups candidates by shared identifiers or normalised title/authors and reports reasons; it does not silently merge the two meanings.
 
@@ -281,13 +281,13 @@ The current key also requires identifiers, title and authors to match simultaneo
 5. Add guarded GUI switching and active-generation checks.
 6. Migrate copy/move destination arguments from paths to aliases, retaining a deprecated internal compatibility path for one release.
 
-Mutation discovery remains gated to exact Calibre 9.12.0 until every switching and targeting contract test passes. Read-only multi-library tools also report their tested Calibre version rather than implying compatibility with an untested runtime.
+Mutation discovery remains gated to exact Calibre 9.15.0 until every switching and targeting contract test passes. Read-only multi-library tools also report their tested Calibre version rather than implying compatibility with an untested runtime.
 
 ## Verification
 
 Pure tests cover alias validation, path redaction, identity mismatches, book-reference scope, cursor binding, limits, duplicate reasons, deterministic confidence and active-generation guards.
 
-Calibre 9.12 source-contract tests pin the broker methods, secondary `LibraryDatabase(..., is_second_db=True)` behaviour, `gui.library_moved()` entry point and Choose Library guard conditions.
+Calibre 9.15 source-contract tests pin the broker methods, secondary `LibraryDatabase(..., is_second_db=True)` behaviour, `gui.library_moved()` entry point and Choose Library guard conditions.
 
 Runtime integration uses three temporary libraries with overlapping book IDs and controlled metadata. It verifies inactive search without a GUI switch, cross-library identifier and title/author matches, same-basename alias handling, stale generation rejection, blocked switching while jobs run, successful switching, broker cleanup and absence of paths in every default response and error.
 

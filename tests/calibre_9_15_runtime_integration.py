@@ -1,22 +1,23 @@
-"""Run with Calibre 9.12.0's embedded Python, not the system Python.
+"""Run with Calibre 9.15.0's embedded Python, not the system Python.
 
 Example:
-    CALIBRE_RUNTIME_ROOT=/opt/calibre-9.12.0 \
-      /opt/calibre-9.12.0/calibre-debug -e tests/calibre_9_12_runtime_integration.py
+    CALIBRE_RUNTIME_ROOT=/opt/calibre-9.15.0 \
+      /opt/calibre-9.15.0/calibre-debug -e tests/calibre_9_15_runtime_integration.py
 """
 
+import faulthandler
 import json
 import os
 import queue
 import shutil
 import socketserver
-import subprocess
 import sys
 import tempfile
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+faulthandler.dump_traceback_later(12, repeat=False)
 PROJECT = Path(__file__).resolve().parents[1]
 CALIBRE_ROOT = Path(os.environ["CALIBRE_RUNTIME_ROOT"]).resolve()
 sys.path.insert(0, str(PROJECT / "plugins"))
@@ -32,8 +33,10 @@ def require(condition, detail):
         raise RuntimeError(detail)
 
 
-require(tuple(numeric_version[:3]) == (9, 12, 0), f"Unexpected Calibre version: {numeric_version!r}")
-root = Path(tempfile.mkdtemp(prefix="calibre-umcp-runtime-"))
+require(tuple(numeric_version[:3]) == (9, 15, 0), f"Unexpected Calibre version: {numeric_version!r}")
+root = Path(tempfile.mkdtemp(
+    prefix="calibre-umcp-runtime-", dir=os.environ.get("CALIBRE_RUNTIME_WORK_ROOT")
+))
 source_path = root / "source"
 destination_path = root / "destination"
 export_path = root / "exports"
@@ -42,22 +45,45 @@ for path in (source_path, destination_path, export_path, fixture_path):
     path.mkdir(parents=True, exist_ok=True)
 
 source = None
+
+
+def progress(label):
+    print(f"runtime-check: {label}", flush=True)
+
+
 try:
     epub = fixture_path / "fixture.epub"
     shutil.copy2(CALIBRE_ROOT / "resources" / "quick_start" / "eng.epub", epub)
+    # A small valid PDF fixture avoids depending on headless Qt PDF rendering.
     pdf = fixture_path / "fixture.pdf"
-    subprocess.run(
-        [str(CALIBRE_ROOT / "ebook-convert"), str(epub), str(pdf)],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    text = b"BT /F1 12 Tf 40 100 Td (Calibre bridge fixture) Tj ET\n"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(text)).encode() + b" >>\nstream\n" + text + b"endstream",
+    ]
+    document = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, 1):
+        offsets.append(len(document))
+        document.extend(f"{index} 0 obj\n".encode() + obj + b"\nendobj\n")
+    xref = len(document)
+    document.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode())
+    for offset in offsets[1:]:
+        document.extend(f"{offset:010d} 00000 n \n".encode())
+    document.extend(f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+    pdf.write_bytes(document)
     cover = (CALIBRE_ROOT / "resources" / "images" / "default_cover.png").read_bytes()
 
+    progress("open temporary source library")
     source = LibraryDatabase(str(source_path), is_second_db=True)
+    progress("open temporary destination library")
     destination = LibraryDatabase(str(destination_path), is_second_db=True)
     destination.close()
 
+    progress("add temporary fixture formats")
     metadata = Metadata("Fixture Book", ["Fixture Author"])
     metadata.identifiers = {"uuid": "fixture"}
     book_id = source.new_api.create_book_entry(metadata, cover=cover, add_duplicates=True)
@@ -81,6 +107,7 @@ try:
         "log": lambda *args: None,
         "notifications": queue.Queue(),
     }
+    progress("native copy")
     copied = bridge._copy_library_worker(
         str(source_path), str(destination_path), (book_id,), "add", {}, **worker_args
     )
@@ -118,6 +145,7 @@ try:
     finally:
         copied_db.close()
 
+    progress("native merge_missing")
     merged = bridge._copy_library_worker(
         str(source_path),
         str(destination_path),
@@ -134,6 +162,7 @@ try:
     finally:
         copied_db.close()
 
+    progress("native replace")
     replaced = bridge._copy_library_worker(
         str(source_path),
         str(destination_path),
@@ -149,6 +178,7 @@ try:
     finally:
         copied_db.close()
 
+    progress("native save to disk")
     exported = bridge._save_disk_worker(
         str(source_path),
         book_id,
@@ -159,11 +189,10 @@ try:
     )
     require(exported["ok"], exported)
     require(exported["artifacts"], exported)
+    actual_exports = {path.name for path in export_path.rglob("*") if path.is_file()}
     for artifact in exported["artifacts"]:
-        require(
-            Path(artifact).resolve().is_relative_to(export_path.resolve()),
-            f"Export escaped root: {artifact}",
-        )
+        require(Path(artifact).name == artifact, f"Export returned a path: {artifact}")
+        require(artifact in actual_exports, f"Export missing under configured root: {artifact}")
 
     received_mail = []
 
@@ -195,6 +224,7 @@ try:
                 else:
                     self.wfile.write(b"250 OK\r\n")
 
+    progress("local SMTP sink")
     with socketserver.TCPServer(("127.0.0.1", 0), SmtpHandler) as sink:
         from calibre.utils.smtp import config as email_config
 
