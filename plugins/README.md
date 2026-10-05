@@ -22,7 +22,7 @@ Restart or reload Calibre. The plugin tries to start MCP about a second after in
 
 For installations without a checkout, `plugins/install-from-gitea.sh` fetches the seven source files, adds the Calibre namespace marker, builds `<resolved PROJECT_TMP_ROOT>/build/calibre-umcp-plugin.zip` and installs it with `calibre-customize`. Despite the script name, its default `SOURCE_BASE` points at the repository's raw GitHub URL unless you override it.
 
-Override `SOURCE_BASE`, `CALIBRE_USER` or `CALIBRE_GROUP` when needed. The script validates an explicit absolute `PROJECT_TMP_ROOT` ending in `/calibre-umcp`; otherwise it tries `/workspace/tmp`, `RUNNER_TEMP`, the original `TMPDIR`, and the platform temporary directory. `WORK` and `OUT` may only select paths within the resolved `runs/` and `build/` hierarchy.
+Override `SOURCE_BASE`, `CALIBRE_USER` or `CALIBRE_GROUP` when needed. The script accepts `PROJECT_TMP_BASE` (appending `/calibre-umcp`) and a compatible explicit `PROJECT_TMP_ROOT`; both must agree when supplied. CI falls back through `RUNNER_TEMP`, the original `TMPDIR`, and system temp, while local use prefers `/workspace/tmp` and then system temp. `WORK` and `OUT` may only select paths within the resolved `runs/` and `build/` hierarchy.
 
 ## Binding And Authentication
 

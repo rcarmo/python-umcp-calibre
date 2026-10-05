@@ -9,13 +9,15 @@ $(error Unable to resolve PROJECT_TMP_ROOT; see resolver diagnostics above)
 endif
 CACHE_ROOT := $(PROJECT_TMP_ROOT)/cache
 BUILD_ROOT := $(PROJECT_TMP_ROOT)/build
+TEST_ROOT := $(PROJECT_TMP_ROOT)/tests
+LOG_ROOT := $(PROJECT_TMP_ROOT)/logs
 RUN_ROOT := $(PROJECT_TMP_ROOT)/runs
 RUN_ID ?= $(shell date -u +%Y%m%dT%H%M%S%NZ)
-RUN_DIR := $(RUN_ROOT)/test/$(RUN_ID)
+RUN_DIR := $(TEST_ROOT)/$(RUN_ID)
 PROFILE_ROOT := evidence/test-profiles
 PROFILE_DIR := $(PROFILE_ROOT)/$(RUN_ID)
 
-export PROJECT_TMP_ROOT CACHE_ROOT BUILD_ROOT RUN_ROOT PROFILE_DIR
+export PROJECT_TMP_ROOT CACHE_ROOT BUILD_ROOT TEST_ROOT LOG_ROOT RUN_ROOT PROFILE_DIR
 export TMPDIR := $(RUN_DIR)/tmp
 export TMP := $(TMPDIR)
 export TEMP := $(TMPDIR)
@@ -42,4 +44,4 @@ build: init
 clean:
 	@set -eu; root="$$(PROJECT_TMP_ROOT="$(PROJECT_TMP_ROOT)" scripts/project-tmp.sh root)"; \
 		test "$$root" = "$(PROJECT_TMP_ROOT)"; test ! -L "$$root"; \
-		rm -rf "$$root/cache" "$$root/build" "$$root/runs"
+		rm -rf "$$root/cache" "$$root/build" "$$root/tests" "$$root/logs" "$$root/runs"

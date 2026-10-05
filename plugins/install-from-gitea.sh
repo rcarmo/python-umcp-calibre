@@ -4,24 +4,40 @@
 set -euo pipefail
 
 SOURCE_BASE=${SOURCE_BASE:-https://raw.githubusercontent.com/rcarmo/python-umcp-calibre/main}
-explicit_root=${PROJECT_TMP_ROOT+x}
 original_tmpdir=${TMPDIR:-}
 path_usable() {
-  local path="$1" parent
-  [[ "$path" == /* && "${path##*/}" == calibre-umcp && ! -L "$path" ]] || return 1
+  local path="$1" parent ancestor
+  [[ "$path" == /* && ! -L "$path" ]] || return 1
   case "/${path#/}/" in */../*|*/./*) return 1;; esac
+  ancestor="${path%/*}"; while [[ -n "$ancestor" && "$ancestor" != / ]]; do
+    [[ ! -L "$ancestor" || "$ancestor" == /workspace ]] || return 1; ancestor="${ancestor%/*}"
+  done
   if [[ -e "$path" ]]; then [[ -d "$path" && -O "$path" && -w "$path" && -x "$path" ]] || return 1; fi
   parent="$path"; while [[ ! -e "$parent" && ! -L "$parent" ]]; do parent="${parent%/*}"; [[ -n "$parent" ]] || parent=/; done
   [[ -d "$parent" && -w "$parent" && -x "$parent" ]]
 }
-if [[ -n "$explicit_root" ]]; then
+is_ci() {
+  case "${CI:-}" in ''|0|false|FALSE) ;; *) return 0;; esac
+  case "${GITHUB_ACTIONS:-}:${GITLAB_CI:-}:${TF_BUILD:-}:${CIRCLECI:-}" in *true*|*True*|*TRUE*) return 0;; esac
+  return 1
+}
+explicit_base_root=
+if [[ -n "${PROJECT_TMP_BASE+x}" ]]; then
+  [[ -n "$PROJECT_TMP_BASE" ]] || { echo 'PROJECT_TMP_BASE must not be empty' >&2; exit 1; }
+  explicit_base_root="${PROJECT_TMP_BASE%/}/calibre-umcp"
+  path_usable "$explicit_base_root" || { echo 'Invalid explicit PROJECT_TMP_BASE' >&2; exit 1; }
+fi
+if [[ -n "${PROJECT_TMP_ROOT+x}" ]]; then
   PROJECT_TMP_ROOT=${PROJECT_TMP_ROOT%/}
-  path_usable "$PROJECT_TMP_ROOT" || { echo 'Invalid explicit PROJECT_TMP_ROOT' >&2; exit 1; }
+  [[ "${PROJECT_TMP_ROOT##*/}" == calibre-umcp ]] && path_usable "$PROJECT_TMP_ROOT" || { echo 'Invalid explicit PROJECT_TMP_ROOT' >&2; exit 1; }
+  [[ -z "$explicit_base_root" || "$PROJECT_TMP_ROOT" == "$explicit_base_root" ]] || { echo 'Conflicting PROJECT_TMP_BASE and PROJECT_TMP_ROOT' >&2; exit 1; }
+elif [[ -n "$explicit_base_root" ]]; then
+  PROJECT_TMP_ROOT=$explicit_base_root
 else
   PROJECT_TMP_ROOT=
-  for base in /workspace/tmp "${RUNNER_TEMP:-}" "$original_tmpdir" /tmp; do
-    [[ -n "$base" ]] || continue
-    candidate="${base%/}/calibre-umcp"
+  if is_ci; then bases=("${RUNNER_TEMP:-}" "$original_tmpdir" /tmp); else bases=(/workspace/tmp /tmp); fi
+  for base in "${bases[@]}"; do
+    [[ -n "$base" ]] || continue; candidate="${base%/}/calibre-umcp"
     if path_usable "$candidate"; then PROJECT_TMP_ROOT="$candidate"; break; fi
   done
   [[ -n "$PROJECT_TMP_ROOT" ]] || { echo 'No writable project-owned temporary root available' >&2; exit 1; }
@@ -35,7 +51,7 @@ export WORK OUT
 case "$WORK" in "$PROJECT_TMP_ROOT"/runs/*) ;; *) echo 'WORK must be under PROJECT_TMP_ROOT/runs' >&2; exit 1;; esac
 case "$OUT" in "$PROJECT_TMP_ROOT"/build/*) ;; *) echo 'OUT must be under PROJECT_TMP_ROOT/build' >&2; exit 1;; esac
 
-for path in "$PROJECT_TMP_ROOT" "$PROJECT_TMP_ROOT/cache" "$PROJECT_TMP_ROOT/build" "$PROJECT_TMP_ROOT/runs"; do
+for path in "$PROJECT_TMP_ROOT" "$PROJECT_TMP_ROOT/cache" "$PROJECT_TMP_ROOT/build" "$PROJECT_TMP_ROOT/tests" "$PROJECT_TMP_ROOT/logs" "$PROJECT_TMP_ROOT/runs"; do
   test ! -L "$path" || { echo "Refusing symlink scratch path: $path" >&2; exit 1; }
 done
 rm -rf "$WORK"
