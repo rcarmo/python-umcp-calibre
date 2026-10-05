@@ -2877,7 +2877,7 @@ class CalibreRpcBridge:
             raise BridgeMethodError("UNSUPPORTED_BY_CALIBRE_VERSION", "Calibre save-to-disk APIs are unavailable") from exc
         import tempfile
         source_db = None
-        destination = Path(destination_directory)
+        destination = Path(destination_directory).expanduser().resolve()
         configured_root = next(root for root in self.export_roots if destination == root or root in destination.parents)
         staging = Path(tempfile.mkdtemp(prefix=".calibre-umcp-save-", dir=str(configured_root)))
         backup = Path(tempfile.mkdtemp(prefix=".calibre-umcp-backup-", dir=str(configured_root)))
@@ -3791,7 +3791,7 @@ class CalibreRpcBridge:
                 if isinstance(value, str):
                     for source_path in source_paths:
                         value = value.replace(source_path, f"<source:{Path(source_path).name}>")
-                    return value
+                    return self._redact_public_text(value)
                 return value
 
             try:
