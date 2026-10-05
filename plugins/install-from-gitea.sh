@@ -1,20 +1,40 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Build and install the in-Calibre plugin ZIP from raw source files. Despite the
 # script name, SOURCE_BASE defaults to the repository's raw GitHub URL unless overridden.
-set -eu
+set -euo pipefail
 
 SOURCE_BASE=${SOURCE_BASE:-https://raw.githubusercontent.com/rcarmo/python-umcp-calibre/main}
-PROJECT_TMP_ROOT=${PROJECT_TMP_ROOT:-/workspace/tmp/calibre-umcp}
+explicit_root=${PROJECT_TMP_ROOT+x}
+original_tmpdir=${TMPDIR:-}
+path_usable() {
+  local path="$1" parent
+  [[ "$path" == /* && "${path##*/}" == calibre-umcp && ! -L "$path" ]] || return 1
+  case "/${path#/}/" in */../*|*/./*) return 1;; esac
+  if [[ -e "$path" ]]; then [[ -d "$path" && -O "$path" && -w "$path" && -x "$path" ]] || return 1; fi
+  parent="$path"; while [[ ! -e "$parent" && ! -L "$parent" ]]; do parent="${parent%/*}"; [[ -n "$parent" ]] || parent=/; done
+  [[ -d "$parent" && -w "$parent" && -x "$parent" ]]
+}
+if [[ -n "$explicit_root" ]]; then
+  PROJECT_TMP_ROOT=${PROJECT_TMP_ROOT%/}
+  path_usable "$PROJECT_TMP_ROOT" || { echo 'Invalid explicit PROJECT_TMP_ROOT' >&2; exit 1; }
+else
+  PROJECT_TMP_ROOT=
+  for base in /workspace/tmp "${RUNNER_TEMP:-}" "$original_tmpdir" /tmp; do
+    [[ -n "$base" ]] || continue
+    candidate="${base%/}/calibre-umcp"
+    if path_usable "$candidate"; then PROJECT_TMP_ROOT="$candidate"; break; fi
+  done
+  [[ -n "$PROJECT_TMP_ROOT" ]] || { echo 'No writable project-owned temporary root available' >&2; exit 1; }
+fi
+export PROJECT_TMP_ROOT
 WORK=${WORK:-$PROJECT_TMP_ROOT/runs/plugin-install/current/source}
 OUT=${OUT:-$PROJECT_TMP_ROOT/build/calibre-umcp-plugin.zip}
 CALIBRE_USER=${CALIBRE_USER:-abc}
 CALIBRE_GROUP=${CALIBRE_GROUP:-users}
 export WORK OUT
+case "$WORK" in "$PROJECT_TMP_ROOT"/runs/*) ;; *) echo 'WORK must be under PROJECT_TMP_ROOT/runs' >&2; exit 1;; esac
+case "$OUT" in "$PROJECT_TMP_ROOT"/build/*) ;; *) echo 'OUT must be under PROJECT_TMP_ROOT/build' >&2; exit 1;; esac
 
-case "$PROJECT_TMP_ROOT" in
-  /workspace/tmp/calibre-umcp|*/calibre-umcp) ;;
-  *) echo "PROJECT_TMP_ROOT must end in /calibre-umcp" >&2; exit 1 ;;
-esac
 for path in "$PROJECT_TMP_ROOT" "$PROJECT_TMP_ROOT/cache" "$PROJECT_TMP_ROOT/build" "$PROJECT_TMP_ROOT/runs"; do
   test ! -L "$path" || { echo "Refusing symlink scratch path: $path" >&2; exit 1; }
 done

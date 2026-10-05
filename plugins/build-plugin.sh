@@ -2,9 +2,9 @@
 # Build the in-Calibre plugin ZIP without writing generated files into source.
 set -eu
 cd "$(dirname "$0")"
-PROJECT_TMP_ROOT=${PROJECT_TMP_ROOT:-/workspace/tmp/calibre-umcp}
+PROJECT_TMP_ROOT=$(../scripts/project-tmp.sh root)
+export PROJECT_TMP_ROOT
 OUT=${OUT:-$PROJECT_TMP_ROOT/build/calibre-umcp-plugin.zip}
-case "$PROJECT_TMP_ROOT" in /workspace/tmp/calibre-umcp) ;; *) echo "PROJECT_TMP_ROOT must be /workspace/tmp/calibre-umcp" >&2; exit 1;; esac
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
 export OUT

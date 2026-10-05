@@ -143,20 +143,20 @@ This retains CPU and allocation evidence under `evidence/test-profiles/<run-id>/
 make build
 ```
 
-The output is `/workspace/tmp/calibre-umcp/build/calibre-umcp-plugin.zip`. The build packages `umcp.py` and `umcp_shared.py` from `src/calibre_umcp` without copying generated files into source.
+The output is `<resolved PROJECT_TMP_ROOT>/build/calibre-umcp-plugin.zip`; run `make paths` to print the resolved root. The build packages `umcp.py` and `umcp_shared.py` from `src/calibre_umcp` without copying generated files into source.
 
 ## Install the plugin
 
 Install from a checkout:
 
 ```sh
-calibre-customize -a /workspace/tmp/calibre-umcp/build/calibre-umcp-plugin.zip
+calibre-customize -a "$PROJECT_TMP_ROOT/build/calibre-umcp-plugin.zip"
 ```
 
 linuxserver/calibre runs its profile as `abc`, so container installs normally use:
 
 ```sh
-s6-setuidgid abc calibre-customize -a /workspace/tmp/calibre-umcp/build/calibre-umcp-plugin.zip
+s6-setuidgid abc calibre-customize -a "$PROJECT_TMP_ROOT/build/calibre-umcp-plugin.zip"
 ```
 
 Restart or reload Calibre after replacing the ZIP. The plugin starts MCP about one second after initialisation, once the active library is available. The **µMCP Bridge** menu has Status, Configure, Stop and Start commands if automatic startup fails.

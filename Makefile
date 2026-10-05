@@ -1,7 +1,12 @@
 SHELL := /bin/bash
 
 PROJECT := calibre-umcp
-PROJECT_TMP_ROOT := /workspace/tmp/$(PROJECT)
+# Resolve once before TMPDIR is exported. An explicit PROJECT_TMP_ROOT is validated
+# by the vendored resolver; otherwise it applies the documented portable fallback.
+PROJECT_TMP_ROOT := $(shell scripts/project-tmp.sh root)
+ifeq ($(strip $(PROJECT_TMP_ROOT)),)
+$(error Unable to resolve PROJECT_TMP_ROOT; see resolver diagnostics above)
+endif
 CACHE_ROOT := $(PROJECT_TMP_ROOT)/cache
 BUILD_ROOT := $(PROJECT_TMP_ROOT)/build
 RUN_ROOT := $(PROJECT_TMP_ROOT)/runs
@@ -20,13 +25,11 @@ export PIP_CACHE_DIR := $(CACHE_ROOT)/pip
 .PHONY: paths init test build clean
 
 paths:
-	@printf '%s\n' "PROJECT_TMP_ROOT=$(PROJECT_TMP_ROOT)" "CACHE_ROOT=$(CACHE_ROOT)" "BUILD_ROOT=$(BUILD_ROOT)" "RUN_ROOT=$(RUN_ROOT)"
+	@scripts/project-tmp.sh paths
 
 init:
-	@set -eu; for path in /workspace/tmp "$(PROJECT_TMP_ROOT)" "$(CACHE_ROOT)" "$(BUILD_ROOT)" "$(RUN_ROOT)"; do \
-		test ! -L "$$path" || { echo "Refusing symlink scratch path: $$path" >&2; exit 1; }; \
-		if test -e "$$path"; then test -d "$$path" && test -O "$$path" || { echo "Scratch path must be an owned directory: $$path" >&2; exit 1; }; fi; \
-	done; mkdir -p "$(CACHE_ROOT)/python" "$(CACHE_ROOT)/pip" "$(BUILD_ROOT)" "$(RUN_ROOT)"
+	@scripts/project-tmp.sh init
+	@mkdir -p "$(CACHE_ROOT)/python" "$(CACHE_ROOT)/pip"
 
 test: init
 	@mkdir -p "$(TMPDIR)" "$(PROFILE_ROOT)"
@@ -37,6 +40,6 @@ build: init
 	OUT="$(BUILD_ROOT)/calibre-umcp-plugin.zip" sh plugins/build-plugin.sh
 
 clean:
-	@set -eu; test "$(PROJECT_TMP_ROOT)" = /workspace/tmp/calibre-umcp; \
-		test ! -L "$(PROJECT_TMP_ROOT)"; \
-		rm -rf "$(CACHE_ROOT)" "$(BUILD_ROOT)" "$(RUN_ROOT)"
+	@set -eu; root="$$(PROJECT_TMP_ROOT="$(PROJECT_TMP_ROOT)" scripts/project-tmp.sh root)"; \
+		test "$$root" = "$(PROJECT_TMP_ROOT)"; test ! -L "$$root"; \
+		rm -rf "$$root/cache" "$$root/build" "$$root/runs"
