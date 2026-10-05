@@ -30,9 +30,10 @@ from urllib.parse import urlparse
 
 BRIDGE_VERSION = PLUGIN_VERSION_STRING
 SCHEMA_VERSION = 2
-TOOLSET_VERSION = 5
-SUPPORTED_CALIBRE_MUTATION_VERSION = (9, 12, 0)
+TOOLSET_VERSION = 9
+SUPPORTED_CALIBRE_MUTATION_VERSION = (9, 15, 0)
 MAX_MUTATION_BATCH = 100
+SUPPORTED_STAGED_IMPORT_FORMATS = frozenset({"AZW3", "CBR", "CBZ", "DOCX", "EPUB", "FB2", "HTML", "KEPUB", "MOBI", "ODT", "PDF", "PRC", "RTF", "TXT"})
 
 
 def mutation_runtime_supported() -> bool:
@@ -80,6 +81,17 @@ STABLE_MUTATION_ERRORS = frozenset({
     "UNSUPPORTED_BY_CALIBRE_VERSION",
     "PARTIAL_COPY",
     "ACTIVE_JOB_CONFLICT",
+    "STAGING_DISABLED",
+    "STAGING_HANDLE_INVALID",
+    "STAGING_HANDLE_EXPIRED",
+    "STAGING_LIMIT_EXCEEDED",
+    "STAGING_FORMAT_UNSUPPORTED",
+    "STAGING_UPLOAD_INCOMPLETE",
+    "STAGING_UPLOAD_CONFLICT",
+    "NEWS_NOT_SCHEDULED",
+    "NEWS_RECIPE_UNKNOWN",
+    "NEWS_QUEUE_CONFLICT",
+    "NEWS_SCHEDULER_UNAVAILABLE",
 })
 
 
@@ -105,6 +117,9 @@ class CalibreRpcBridge:
         audit_retention: int = 500,
         gui_dispatch=None,
         import_roots: tuple[str, ...] = (),
+        import_staging_root: str | None = None,
+        import_staging_max_bytes: int = 104857600,
+        import_staging_ttl_seconds: int = 3600,
         export_roots: tuple[str, ...] = (),
         destination_libraries: tuple[str, ...] = (),
         library_registry: tuple[dict[str, object], ...] = (),
@@ -117,6 +132,10 @@ class CalibreRpcBridge:
         save_to_disk_adapter=None,
         email_config_adapter=None,
         email_send_adapter=None,
+        scheduled_news_list_adapter=None,
+        scheduled_news_queue_adapter=None,
+        scheduled_news_disabled=(),
+        scheduled_news_disabled_save_adapter=None,
     ):
         self.gui = gui
         self.token = token
@@ -126,6 +145,11 @@ class CalibreRpcBridge:
         self.audit_path = Path(audit_path) if audit_path else None
         self.audit_retention = max(10, min(int(audit_retention), 10000))
         self.import_roots = tuple(Path(root).expanduser().resolve() for root in import_roots)
+        self.import_staging_root = Path(import_staging_root).expanduser().resolve() if import_staging_root else None
+        self.import_staging_max_bytes = max(1, min(int(import_staging_max_bytes), 1_073_741_824))
+        self.import_staging_ttl_seconds = max(60, min(int(import_staging_ttl_seconds), 86_400))
+        self.import_staging_handles: dict[str, dict[str, Any]] = {}
+        self.import_staging_chunk_max_bytes = min(8 * 1024 * 1024, self.import_staging_max_bytes)
         self.export_roots = tuple(Path(root).expanduser().resolve() for root in export_roots)
         self.destination_libraries = tuple(Path(root).expanduser().resolve() for root in destination_libraries)
         self.library_registry = tuple(dict(entry) for entry in library_registry)
@@ -139,7 +163,12 @@ class CalibreRpcBridge:
         self._save_to_disk_adapter = save_to_disk_adapter
         self._email_config_adapter = email_config_adapter
         self._email_send_adapter = email_send_adapter
+        self._scheduled_news_list_adapter = scheduled_news_list_adapter
+        self._scheduled_news_queue_adapter = scheduled_news_queue_adapter
+        self._scheduled_news_disabled_save_adapter = scheduled_news_disabled_save_adapter
+        self._scheduled_news_disabled = self._normalise_disabled_scheduled_news(scheduled_news_disabled)
         self._conversion_context: dict[str, dict[str, Any]] = {}
+        self._news_context: dict[str, dict[str, Any]] = {}
         self._import_context: dict[str, dict[str, Any]] = {}
         self._copy_context: dict[str, dict[str, Any]] = {}
         self._save_context: dict[str, dict[str, Any]] = {}
@@ -214,8 +243,8 @@ class CalibreRpcBridge:
     def dispatch(self, method: str, params: dict[str, Any]) -> Any:
         if method in {
             "update_book_metadata", "add_book_format", "delete_book_format", "set_book_cover",
-            "add_book", "delete_books", "merge_duplicates", "convert_book", "copy_books_to_library",
-            "move_books_to_library", "save_book_to_disk", "email_book",
+            "update_scheduled_news_schedule", "disable_scheduled_news", "add_book", "delete_books", "merge_duplicates", "convert_book",
+            "copy_books_to_library", "move_books_to_library", "save_book_to_disk", "email_book",
         }:
             self._require_active_guards(params)
         if method == "ping":
@@ -243,6 +272,8 @@ class CalibreRpcBridge:
             return self._switch_library(params)
         if method == "content_server_status":
             return self._content_server_status()
+        if method == "list_scheduled_news":
+            return self._list_scheduled_news()
         if method == "list_jobs":
             return self._list_jobs()
         if method == "get_job_status":
@@ -255,6 +286,20 @@ class CalibreRpcBridge:
             return self._delete_book_format(params)
         if method == "set_book_cover":
             return self._set_book_cover(params)
+        if method == "begin_import_attachment":
+            return self._begin_import_attachment(params)
+        if method == "append_import_attachment":
+            return self._append_import_attachment(params)
+        if method == "finalize_import_attachment":
+            return self._finalize_import_attachment(params)
+        if method == "stage_import_attachment":
+            return self._stage_import_attachment(params)
+        if method == "download_scheduled_news":
+            return self._download_scheduled_news(params)
+        if method == "update_scheduled_news_schedule":
+            return self._update_scheduled_news_schedule(params)
+        if method == "disable_scheduled_news":
+            return self._disable_scheduled_news(params)
         if method == "add_book":
             return self._add_book(params)
         if method == "delete_books":
@@ -1165,14 +1210,14 @@ class CalibreRpcBridge:
         if not mutation_runtime_supported():
             raise BridgeMethodError(
                 "UNSUPPORTED_BY_CALIBRE_VERSION",
-                f"Calibre {'.'.join(map(str, numeric_version))} has not passed the exact 9.12.0 mutation contract tests",
+                f"Calibre {'.'.join(map(str, numeric_version))} has not passed the exact 9.15.0 mutation contract tests",
             )
         api = getattr(self._db(), "new_api", None)
         required = ("has_id", "set_metadata", "format", "add_format", "remove_formats")
         if api is None or any(not callable(getattr(api, name, None)) for name in required):
             raise BridgeMethodError(
                 "UNSUPPORTED_BY_CALIBRE_VERSION",
-                "The active database does not expose the Calibre 9.12 mutation API contract",
+                "The active database does not expose the Calibre 9.15 mutation API contract",
             )
         return api
 
@@ -1222,6 +1267,7 @@ class CalibreRpcBridge:
             self._copy_context,
             self._save_context,
             self._email_context,
+            self._news_context,
         ):
             for context in contexts.values():
                 if context.get("book_id") is not None:
@@ -1392,15 +1438,508 @@ class CalibreRpcBridge:
 
         return self._run_short_mutation("update_book_metadata", params, operation)
 
+    @staticmethod
+    def _normalise_disabled_scheduled_news(value: Any) -> dict[str, dict[str, Any]]:
+        if not isinstance(value, dict):
+            return {}
+        saved: dict[str, dict[str, Any]] = {}
+        for urn, item in value.items():
+            if not isinstance(urn, str) or not re.fullmatch(r"(?:builtin|custom):[A-Za-z0-9_.-]+", urn):
+                continue
+            if not isinstance(item, dict):
+                continue
+            schedule_type = item.get("schedule_type")
+            schedule = item.get("schedule")
+            if isinstance(schedule_type, str) and isinstance(schedule, (list, tuple)):
+                saved[urn] = {
+                    "schedule_type": schedule_type,
+                    "schedule": copy.deepcopy(list(schedule)),
+                    "last_downloaded": str(item.get("last_downloaded") or ""),
+                }
+        return saved
+
+    def _save_disabled_scheduled_news(self) -> None:
+        if self._scheduled_news_disabled_save_adapter is None:
+            return
+        try:
+            self._scheduled_news_disabled_save_adapter(copy.deepcopy(self._scheduled_news_disabled))
+        except Exception as exc:
+            raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre could not persist disabled scheduled-news state") from exc
+
+    @staticmethod
+    def _scheduled_news_item(model, urn: str, entry=None, disabled=None) -> dict[str, Any] | None:
+        # Calibre returns an XML element here. A recipe element has no child
+        # nodes and therefore has a false boolean value; test its identity,
+        # not truthiness, so a valid live recipe is never mistaken for absent.
+        recipe = model.recipe_from_urn(urn)
+        if recipe is None:
+            return None
+        schedule_info = model.schedule_info_from_urn(urn)
+        customization = model.get_customize_info(urn)
+        if entry is None:
+            entry = {}
+        if disabled is None:
+            disabled = {}
+        scheduled = bool(schedule_info)
+        last_downloaded = entry.get("last_downloaded") or disabled.get("last_downloaded") or ""
+        return {
+            "urn": urn,
+            "title": str(recipe.get("title") or entry.get("title") or ""),
+            "enabled": scheduled,
+            "schedule_type": schedule_info[0] if schedule_info else None,
+            "schedule": schedule_info[1] if schedule_info else None,
+            "last_downloaded": str(last_downloaded),
+            "previous_schedule_type": disabled.get("schedule_type") if not scheduled else None,
+            "previous_schedule": disabled.get("schedule") if not scheduled else None,
+            "keep_issues": int(getattr(customization, "keep_issues", 0) or 0),
+            "custom_tags": list(getattr(customization, "custom_tags", ()) or ()),
+            "add_title_tag": bool(getattr(customization, "add_title_tag", False)),
+        }
+
+    def _list_scheduled_news(self) -> dict[str, Any]:
+        if self._scheduled_news_list_adapter is not None:
+            return {"items": self._scheduled_news_list_adapter(self.gui)}
+        action = getattr(self.gui, "iactions", {}).get("Fetch News")
+        scheduler = getattr(action, "scheduler", None)
+        model = getattr(scheduler, "recipe_model", None)
+        if scheduler is None or model is None:
+            raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre's Fetch News scheduler is not available")
+        try:
+            scheduled_by_urn = {
+                str(entry.get("id") or ""): entry
+                for entry in model.scheduler_config.iter_recipes()
+            }
+            urns = set(scheduled_by_urn) | set(self._scheduled_news_disabled)
+            items = []
+            for urn in sorted(urns):
+                item = self._scheduled_news_item(
+                    model, urn, scheduled_by_urn.get(urn), self._scheduled_news_disabled.get(urn),
+                )
+                if item is not None:
+                    items.append(item)
+            return {"items": items}
+        except BridgeMethodError:
+            raise
+        except Exception as exc:
+            raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre's scheduled-news configuration could not be read") from exc
+
+    def _require_news_recipe(self, model, urn: str) -> dict[str, Any]:
+        if not re.fullmatch(r"(?:builtin|custom):[A-Za-z0-9_.-]+", urn):
+            raise BridgeMethodError("POLICY_DENIED", "urn must be a configured builtin: or custom: recipe identifier")
+        item = self._scheduled_news_item(model, urn, disabled=self._scheduled_news_disabled.get(urn))
+        if item is None:
+            raise BridgeMethodError("NEWS_RECIPE_UNKNOWN", "The scheduled-news recipe does not exist")
+        return item
+
+    def _scheduled_news_conflict(self, scheduler, urn: str) -> bool:
+        if urn in set(getattr(scheduler, "download_queue", ()) or ()):
+            return True
+        return any(context.get("urn") == urn for context in self._news_context.values())
+
+    def _disable_scheduled_news(self, params: dict[str, Any]) -> dict[str, Any]:
+        urn = str(params.get("urn") or "").strip()
+        action = getattr(self.gui, "iactions", {}).get("Fetch News")
+        scheduler = getattr(action, "scheduler", None)
+        model = getattr(scheduler, "recipe_model", None)
+        if model is None or not callable(getattr(model, "un_schedule_recipe", None)):
+            raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre's Fetch News scheduler is not available")
+        scheduled_entries = {
+            str(entry.get("id") or ""): entry
+            for entry in model.scheduler_config.iter_recipes()
+        }
+        before = self._scheduled_news_item(
+            model, urn, scheduled_entries.get(urn), self._scheduled_news_disabled.get(urn),
+        )
+        if before is None:
+            if not re.fullmatch(r"(?:builtin|custom):[A-Za-z0-9_.-]+", urn):
+                raise BridgeMethodError("POLICY_DENIED", "urn must be a configured builtin: or custom: recipe identifier")
+            raise BridgeMethodError("NEWS_RECIPE_UNKNOWN", "The scheduled-news recipe does not exist")
+        if self._scheduled_news_conflict(scheduler, urn):
+            raise BridgeMethodError("NEWS_QUEUE_CONFLICT", "This scheduled recipe has an active native Calibre job")
+        if not before["enabled"]:
+            return self._run_short_mutation(
+                "disable_scheduled_news", params,
+                lambda: {
+                    "urn": urn,
+                    "changed": False,
+                    "enabled": False,
+                    "previous_schedule": copy.deepcopy(self._scheduled_news_disabled.get(urn)),
+                },
+            )
+        prior = {
+            "schedule_type": before["schedule_type"],
+            "schedule": copy.deepcopy(before["schedule"]),
+            "last_downloaded": before["last_downloaded"],
+        }
+
+        disabled_state_before = copy.deepcopy(self._scheduled_news_disabled)
+
+        def operation():
+            try:
+                model.un_schedule_recipe(urn)
+                after = self._require_news_recipe(model, urn)
+                if after["enabled"]:
+                    raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre did not remove the scheduled-news recurrence")
+                self._scheduled_news_disabled[urn] = prior
+                self._save_disabled_scheduled_news()
+                return {"urn": urn, "changed": True, "enabled": False, "previous_schedule": prior}
+            except Exception as exc:
+                try:
+                    if not self._require_news_recipe(model, urn)["enabled"]:
+                        model.schedule_recipe(urn, prior["schedule_type"], prior["schedule"])
+                    self._scheduled_news_disabled = disabled_state_before
+                    self._save_disabled_scheduled_news()
+                except Exception as rollback_exc:
+                    raise BridgeMethodError(
+                        "NEWS_SCHEDULER_UNAVAILABLE", f"Scheduled-news disable failed and rollback failed: {rollback_exc}",
+                    ) from exc
+                if isinstance(exc, BridgeMethodError):
+                    raise
+                raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre could not disable the scheduled-news recurrence") from exc
+
+        return self._run_short_mutation("disable_scheduled_news", params, operation)
+
+    def _update_scheduled_news_schedule(self, params: dict[str, Any]) -> dict[str, Any]:
+        urn = str(params.get("urn") or "").strip()
+        if not re.fullmatch(r"(?:builtin|custom):[A-Za-z0-9_.-]+", urn):
+            raise BridgeMethodError("POLICY_DENIED", "urn must be a configured builtin: or custom: recipe identifier")
+        days = params.get("days_of_week")
+        if not isinstance(days, list) or not days or len(days) > 7 or any(type(day) is not int or day < 0 or day > 6 for day in days):
+            raise BridgeMethodError("POLICY_DENIED", "days_of_week must contain one to seven day indexes from 0 through 6")
+        if len(set(days)) != len(days):
+            raise BridgeMethodError("POLICY_DENIED", "days_of_week must not contain duplicates")
+        hour = params.get("hour")
+        minute = params.get("minute")
+        if type(hour) is not int or hour < 0 or hour > 23:
+            raise BridgeMethodError("POLICY_DENIED", "hour must be an integer from 0 through 23")
+        if type(minute) is not int or minute < 0 or minute > 59:
+            raise BridgeMethodError("POLICY_DENIED", "minute must be an integer from 0 through 59")
+        if any(context.get("urn") == urn for context in self._news_context.values()):
+            raise BridgeMethodError("NEWS_QUEUE_CONFLICT", "This scheduled recipe has an active native Calibre job")
+
+        action = getattr(self.gui, "iactions", {}).get("Fetch News")
+        scheduler = getattr(action, "scheduler", None)
+        model = getattr(scheduler, "recipe_model", None)
+        if model is None or not callable(getattr(model, "schedule_recipe", None)):
+            raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre's Fetch News scheduler is not available")
+        before = next((entry for entry in self._list_scheduled_news()["items"] if entry["urn"] == urn), None)
+        if before is None:
+            raise BridgeMethodError("NEWS_NOT_SCHEDULED", "Only an existing configured scheduled recipe may be changed")
+        if not before.get("enabled"):
+            raise BridgeMethodError("NEWS_NOT_SCHEDULED", "The scheduled-news recipe is disabled")
+        previous_type = before.get("schedule_type")
+        previous_schedule = before.get("schedule")
+        if not previous_type or previous_schedule is None:
+            raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "The existing scheduled-news schedule could not be read")
+        requested_schedule = [sorted(days), hour, minute]
+
+        def operation():
+            try:
+                model.schedule_recipe(urn, "days_of_week", requested_schedule)
+                after = next((entry for entry in self._list_scheduled_news()["items"] if entry["urn"] == urn), None)
+                if after is None or after.get("schedule_type") != "days_of_week" or after.get("schedule") != requested_schedule:
+                    raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre did not retain the requested scheduled-news schedule")
+                preserved_fields = ("urn", "title", "last_downloaded", "keep_issues", "custom_tags", "add_title_tag")
+                if any(after.get(field) != before.get(field) for field in preserved_fields):
+                    raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Unrelated scheduled-news settings changed during verification")
+                return {
+                    "urn": urn,
+                    "schedule_type": after["schedule_type"],
+                    "schedule": after["schedule"],
+                    "preserved": {field: after.get(field) for field in preserved_fields if field != "urn"},
+                }
+            except Exception as exc:
+                try:
+                    model.schedule_recipe(urn, previous_type, previous_schedule)
+                except Exception as rollback_exc:
+                    raise BridgeMethodError(
+                        "NEWS_SCHEDULER_UNAVAILABLE",
+                        f"Schedule update failed and rollback failed: {rollback_exc}",
+                    ) from exc
+                if isinstance(exc, BridgeMethodError):
+                    raise
+                raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre could not update the scheduled-news schedule") from exc
+
+        return self._run_short_mutation("update_scheduled_news_schedule", params, operation)
+
+    @staticmethod
+    def _scheduled_news_job_for_urn(action, before: set, urn: str):
+        """Return the single newly registered Fetch News job for *urn*, if any.
+
+        Calibre 9.15 connects ``Scheduler.start_recipe_fetch`` to
+        ``FetchNewsAction.download_scheduled_recipe`` with a queued Qt
+        connection.  Consequently ``Scheduler.download()`` can return before
+        the action has added its JobManager job to ``conversion_jobs``.  The
+        caller must therefore process queued events before treating an empty
+        mapping as a failed hand-off.
+        """
+        conversion_jobs = getattr(action, "conversion_jobs", {})
+        created = [job for job in conversion_jobs if job not in before]
+        matching = []
+        for job in created:
+            details = conversion_jobs.get(job)
+            arg = details[2] if isinstance(details, (tuple, list)) and len(details) > 2 else None
+            if isinstance(arg, dict) and str(arg.get("urn") or "") == urn:
+                matching.append(job)
+        if len(matching) == 1:
+            return matching[0]
+        if matching:
+            raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre created more than one scheduled-news job for this recipe")
+        if created:
+            raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre created a scheduled-news job for a different recipe")
+        return None
+
+    def _wait_for_scheduled_news_job(self, action, before: set, urn: str):
+        """Allow Calibre's queued Fetch News signal to register its native job.
+
+        This runs on the GUI thread, uses only the Qt event dispatcher and has
+        a short bounded wait.  It never constructs a downloader or writes the
+        library itself: FetchNewsAction remains responsible for the complete
+        native add_news, retention, sync and mail pipeline.
+        """
+        try:
+            from qt.core import QCoreApplication, QEventLoop
+        except ImportError:
+            return self._scheduled_news_job_for_urn(action, before, urn)
+        deadline = time.monotonic() + 1.0
+        while True:
+            native_job = self._scheduled_news_job_for_urn(action, before, urn)
+            if native_job is not None:
+                return native_job
+            if time.monotonic() >= deadline:
+                return None
+            QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 25)
+            time.sleep(0.01)
+
+    def _download_scheduled_news(self, params: dict[str, Any]) -> dict[str, Any]:
+        urn = str(params.get("urn") or "").strip()
+        if not re.fullmatch(r"(?:builtin|custom):[A-Za-z0-9_.-]+", urn):
+            raise BridgeMethodError("POLICY_DENIED", "urn must be a configured builtin: or custom: recipe identifier")
+        scheduled = self._list_scheduled_news()["items"]
+        item = next((entry for entry in scheduled if entry["urn"] == urn), None)
+        if item is None:
+            raise BridgeMethodError("NEWS_NOT_SCHEDULED", "Only an existing configured scheduled recipe may be started")
+        if not item.get("enabled"):
+            raise BridgeMethodError("NEWS_NOT_SCHEDULED", "The scheduled-news recipe is disabled")
+        if any(context.get("urn") == urn for context in self._news_context.values()):
+            raise BridgeMethodError("NEWS_QUEUE_CONFLICT", "This scheduled recipe already has an active native Calibre job")
+        job_id = self._record_job("download_scheduled_news", {"urn": urn}, "waiting_for_gui", "Queuing configured Calibre scheduled-news recipe")
+        try:
+            if self._scheduled_news_queue_adapter is not None:
+                native_job = self._scheduled_news_queue_adapter(self.gui, urn)
+            else:
+                action = getattr(self.gui, "iactions", {}).get("Fetch News")
+                scheduler = getattr(action, "scheduler", None)
+                if action is None or scheduler is None or not callable(getattr(scheduler, "download", None)):
+                    raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre's Fetch News scheduler is not available")
+                before = set(getattr(action, "conversion_jobs", {}))
+                started = scheduler.download(urn)
+                if not started:
+                    raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre declined the scheduled-news download")
+                native_job = self._wait_for_scheduled_news_job(action, before, urn)
+                if native_job is None:
+                    raise BridgeMethodError("NEWS_SCHEDULER_UNAVAILABLE", "Calibre did not register the scheduled-news job after queued event delivery")
+            self._news_context[job_id] = {"urn": urn, "title": item["title"]}
+            self.calibre_jobs[job_id] = native_job
+            return self._update_job(
+                job_id, status="queued", calibre_job_id=getattr(native_job, "id", None),
+                message="Queued through Calibre's Fetch News scheduler",
+                result={"urn": urn, "title": item["title"], "native_pipeline": "FetchNewsAction/Scheduler/add_news"},
+            )
+        except Exception as exc:
+            self.calibre_jobs.pop(job_id, None)
+            self._news_context.pop(job_id, None)
+            error = exc if isinstance(exc, BridgeMethodError) else BridgeMethodError("CALIBRE_JOB_FAILED", "Scheduled news could not be queued")
+            self._update_job(job_id, status="failed", message="Scheduled-news job was not queued", error=str(error))
+            if error is exc:
+                raise
+            raise error from exc
+
+    def _configured_import_roots(self) -> tuple[Path, ...]:
+        roots = self.import_roots
+        if self.import_staging_root is not None and self.import_staging_root not in roots:
+            roots += (self.import_staging_root,)
+        return roots
+
     def _allowed_import_path(self, value: str) -> Path:
         if not isinstance(value, str) or not value.strip():
             raise BridgeMethodError("PATH_NOT_ALLOWED", "A source file path is required")
         candidate = Path(os.path.realpath(os.path.expanduser(value)))
         if not candidate.is_file():
             raise BridgeMethodError("PATH_NOT_ALLOWED", "The source file does not exist or is not a regular file")
-        if not any(candidate == root or root in candidate.parents for root in self.import_roots):
+        if not any(candidate == root or root in candidate.parents for root in self._configured_import_roots()):
             raise BridgeMethodError("PATH_NOT_ALLOWED", "The source file is outside configured import roots")
         return candidate
+
+    def _prune_import_staging(self) -> None:
+        now = time.time()
+        stale = [handle for handle, item in self.import_staging_handles.items() if item["expires_at"] <= now]
+        for handle in stale:
+            item = self.import_staging_handles.pop(handle)
+            try:
+                Path(item["path"]).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _staged_import_path(self, handle: Any) -> Path:
+        self._prune_import_staging()
+        if not isinstance(handle, str) or not handle:
+            raise BridgeMethodError("STAGING_HANDLE_INVALID", "A staged import handle is required")
+        item = self.import_staging_handles.pop(handle, None)
+        if item is None:
+            raise BridgeMethodError("STAGING_HANDLE_INVALID", "The staged import handle is unknown, expired or already consumed")
+        source = Path(item["path"])
+        if item["expires_at"] <= time.time():
+            source.unlink(missing_ok=True)
+            raise BridgeMethodError("STAGING_HANDLE_EXPIRED", "The staged import handle expired")
+        if not source.is_file():
+            raise BridgeMethodError("STAGING_HANDLE_INVALID", "The staged import file is unavailable")
+        return source
+
+    def _source_from_path_or_staged_handle(self, params: dict[str, Any]) -> tuple[Path, bool]:
+        has_path = bool(params.get("path"))
+        has_handle = bool(params.get("staged_handle"))
+        if has_path == has_handle:
+            raise BridgeMethodError("POLICY_DENIED", "Specify exactly one of path or staged_handle")
+        return (self._allowed_import_path(str(params["path"])), False) if has_path else (self._staged_import_path(params["staged_handle"]), True)
+
+    def _import_staging_metadata(self, params: dict[str, Any]) -> tuple[str, str, int, str]:
+        if self.import_staging_root is None:
+            raise BridgeMethodError("STAGING_DISABLED", "Attachment staging is not configured in Calibre UI policy")
+        name = str(params.get("filename") or "").strip()
+        if not name or Path(name).name != name or name in {".", ".."}:
+            raise BridgeMethodError("POLICY_DENIED", "filename must be a plain file name")
+        fmt = self._format_name(params.get("format"), Path(name))
+        if fmt not in SUPPORTED_STAGED_IMPORT_FORMATS:
+            raise BridgeMethodError("STAGING_FORMAT_UNSUPPORTED", "The staged attachment format is not supported")
+        size_bytes = int(params.get("size_bytes") or 0)
+        if size_bytes < 1 or size_bytes > self.import_staging_max_bytes:
+            raise BridgeMethodError("STAGING_LIMIT_EXCEEDED", "The staged attachment exceeds the configured size limit")
+        digest = str(params.get("sha256") or "").casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise BridgeMethodError("POLICY_DENIED", "sha256 must be a lowercase 64-character hexadecimal digest")
+        return name, fmt, size_bytes, digest
+
+    def _begin_import_attachment(self, params: dict[str, Any]) -> dict[str, Any]:
+        name, fmt, size_bytes, digest = self._import_staging_metadata(params)
+        self._prune_import_staging()
+        self.import_staging_root.mkdir(parents=True, exist_ok=True)
+        if not self.import_staging_root.is_dir():
+            raise BridgeMethodError("STAGING_DISABLED", "The configured staging root is unavailable")
+        handle = f"stage:{uuid.uuid4().hex}"
+        destination = self.import_staging_root / f"{uuid.uuid4().hex}.{fmt.lower()}.part"
+        try:
+            with destination.open("xb"):
+                pass
+        except Exception as exc:
+            raise BridgeMethodError("CALIBRE_JOB_FAILED", "Could not create the staged attachment") from exc
+        now = time.time()
+        self.import_staging_handles[handle] = {
+            "path": str(destination), "filename": name, "format": fmt, "size_bytes": size_bytes,
+            "sha256": digest, "written_bytes": 0, "created_at": now, "expires_at": now + self.import_staging_ttl_seconds,
+        }
+        return {"upload_handle": handle, "filename": name, "format": fmt, "size_bytes": size_bytes, "chunk_max_bytes": self.import_staging_chunk_max_bytes, "expires_at": self.import_staging_handles[handle]["expires_at"]}
+
+    def _append_import_attachment(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._prune_import_staging()
+        handle = str(params.get("upload_handle") or "")
+        item = self.import_staging_handles.get(handle)
+        if item is None:
+            raise BridgeMethodError("STAGING_HANDLE_INVALID", "The attachment upload handle is unknown or expired")
+        if item["expires_at"] <= time.time():
+            self.import_staging_handles.pop(handle, None)
+            Path(item["path"]).unlink(missing_ok=True)
+            raise BridgeMethodError("STAGING_HANDLE_EXPIRED", "The attachment upload handle expired")
+        try:
+            chunk = base64.b64decode(str(params.get("content_base64") or ""), validate=True)
+        except Exception as exc:
+            raise BridgeMethodError("POLICY_DENIED", "content_base64 is not valid base64") from exc
+        if not chunk or len(chunk) > self.import_staging_chunk_max_bytes:
+            raise BridgeMethodError("STAGING_LIMIT_EXCEEDED", "The attachment chunk is empty or exceeds the configured chunk limit")
+        if item["written_bytes"] + len(chunk) > item["size_bytes"]:
+            raise BridgeMethodError("STAGING_LIMIT_EXCEEDED", "The attachment exceeds its declared size")
+        try:
+            with Path(item["path"]).open("ab") as stream:
+                stream.write(chunk)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except Exception as exc:
+            raise BridgeMethodError("CALIBRE_JOB_FAILED", "Could not write the staged attachment chunk") from exc
+        item["written_bytes"] += len(chunk)
+        return {"upload_handle": handle, "written_bytes": item["written_bytes"], "size_bytes": item["size_bytes"], "complete": item["written_bytes"] == item["size_bytes"]}
+
+    def _finalize_import_attachment(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._prune_import_staging()
+        handle = str(params.get("upload_handle") or "")
+        item = self.import_staging_handles.pop(handle, None)
+        if item is None:
+            raise BridgeMethodError("STAGING_HANDLE_INVALID", "The attachment upload handle is unknown or expired")
+        path = Path(item["path"])
+        if item["written_bytes"] != item["size_bytes"]:
+            path.unlink(missing_ok=True)
+            raise BridgeMethodError("STAGING_UPLOAD_INCOMPLETE", "The staged attachment does not match its declared size")
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except Exception as exc:
+            raise BridgeMethodError("CALIBRE_JOB_FAILED", "Could not validate the staged attachment") from exc
+        if digest != item["sha256"]:
+            path.unlink(missing_ok=True)
+            raise BridgeMethodError("STAGING_UPLOAD_CONFLICT", "The staged attachment checksum did not match")
+        final_path = path.with_suffix(".ready")
+        try:
+            os.replace(path, final_path)
+        except Exception as exc:
+            path.unlink(missing_ok=True)
+            raise BridgeMethodError("CALIBRE_JOB_FAILED", "Could not finalize the staged attachment") from exc
+        staged_handle = f"stage:{uuid.uuid4().hex}"
+        self.import_staging_handles[staged_handle] = {**item, "path": str(final_path)}
+        return {"staged_handle": staged_handle, "filename": item["filename"], "format": item["format"], "size_bytes": item["size_bytes"], "sha256": digest, "expires_at": item["expires_at"]}
+
+    def _stage_import_attachment(self, params: dict[str, Any]) -> dict[str, Any]:
+        if self.import_staging_root is None:
+            raise BridgeMethodError("STAGING_DISABLED", "Attachment staging is not configured in Calibre UI policy")
+        self._prune_import_staging()
+        name = str(params.get("filename") or "").strip()
+        encoded = params.get("content_base64")
+        if not name or Path(name).name != name or name in {".", ".."}:
+            raise BridgeMethodError("POLICY_DENIED", "filename must be a plain file name")
+        fmt = self._format_name(params.get("format"), Path(name))
+        if fmt not in SUPPORTED_STAGED_IMPORT_FORMATS:
+            raise BridgeMethodError("STAGING_FORMAT_UNSUPPORTED", "The staged attachment format is not supported")
+        if not isinstance(encoded, str) or not encoded:
+            raise BridgeMethodError("POLICY_DENIED", "content_base64 is required")
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except Exception as exc:
+            raise BridgeMethodError("POLICY_DENIED", "content_base64 is not valid base64") from exc
+        if not payload:
+            raise BridgeMethodError("POLICY_DENIED", "The staged attachment is empty")
+        if len(payload) > self.import_staging_max_bytes:
+            raise BridgeMethodError("STAGING_LIMIT_EXCEEDED", "The staged attachment exceeds the configured size limit")
+        self.import_staging_root.mkdir(parents=True, exist_ok=True)
+        if not self.import_staging_root.is_dir():
+            raise BridgeMethodError("STAGING_DISABLED", "The configured staging root is unavailable")
+        handle = f"stage:{uuid.uuid4().hex}"
+        destination = self.import_staging_root / f"{uuid.uuid4().hex}.{fmt.lower()}"
+        try:
+            with destination.open("xb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except Exception as exc:
+            destination.unlink(missing_ok=True)
+            raise BridgeMethodError("CALIBRE_JOB_FAILED", "Could not write the staged attachment") from exc
+        now = time.time()
+        self.import_staging_handles[handle] = {
+            "path": str(destination), "filename": name, "format": fmt,
+            "size_bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+            "created_at": now, "expires_at": now + self.import_staging_ttl_seconds,
+        }
+        return {
+            "staged_handle": handle, "filename": name, "format": fmt,
+            "size_bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+            "expires_at": self.import_staging_handles[handle]["expires_at"],
+        }
 
     def _allowed_export_path(self, value: Any, output_format: str) -> Path:
         if not isinstance(value, str) or not value.strip():
@@ -1423,7 +1962,7 @@ class CalibreRpcBridge:
 
     def _add_book_format(self, params: dict[str, Any]) -> dict[str, Any]:
         book_id = int(params["book_id"])
-        source = self._allowed_import_path(str(params.get("path") or ""))
+        source, staged = self._source_from_path_or_staged_handle(params)
         fmt = self._format_name(params.get("format"), source)
         replace = bool(params.get("replace", False))
 
@@ -1462,7 +2001,11 @@ class CalibreRpcBridge:
             warnings = self._book_refresh_warnings(book_id)
             return {"book_id": book_id, "format": fmt, "replaced": previous is not None, "warnings": warnings}
 
-        return self._run_short_mutation("add_book_format", params, operation)
+        try:
+            return self._run_short_mutation("add_book_format", params, operation)
+        finally:
+            if staged:
+                source.unlink(missing_ok=True)
 
     def _delete_book_format(self, params: dict[str, Any]) -> dict[str, Any]:
         book_id = int(params["book_id"])
@@ -1553,7 +2096,7 @@ class CalibreRpcBridge:
             raise
 
     def _add_book(self, params: dict[str, Any]) -> dict[str, Any]:
-        source = self._allowed_import_path(str(params.get("path") or ""))
+        source, staged = self._source_from_path_or_staged_handle(params)
         fmt = self._format_name(params.get("format"), source)
         duplicate_policy = str(params.get("duplicate_policy") or "reject").strip().lower()
         if duplicate_policy not in {"reject", "skip", "add"}:
@@ -1580,6 +2123,7 @@ class CalibreRpcBridge:
                 "format": fmt,
                 "duplicate_policy": duplicate_policy,
                 "source_name": source.name,
+                "staged_source": str(source) if staged else None,
             }
             self.calibre_jobs[job_id] = native_job
             self.gui.job_manager.run_threaded_job(native_job)
@@ -1592,6 +2136,8 @@ class CalibreRpcBridge:
         except Exception as exc:
             self.calibre_jobs.pop(job_id, None)
             self._import_context.pop(job_id, None)
+            if staged:
+                source.unlink(missing_ok=True)
             error = exc if isinstance(exc, BridgeMethodError) else BridgeMethodError(
                 "CALIBRE_JOB_FAILED", "Book import could not be queued",
             )
@@ -1680,6 +2226,9 @@ class CalibreRpcBridge:
         finally:
             if temp_path:
                 Path(temp_path).unlink(missing_ok=True)
+            staged_source = context.get("staged_source")
+            if staged_source:
+                Path(staged_source).unlink(missing_ok=True)
 
     def _set_book_cover(self, params: dict[str, Any]) -> dict[str, Any]:
         book_id = int(params["book_id"])
@@ -2342,7 +2891,7 @@ class CalibreRpcBridge:
                 return {"ok": False, "code": "BOOK_NOT_FOUND", "message": f"Book {book_id} no longer exists"}
 
             class SaveToDiskDatabaseAdapter:
-                # Calibre 9.12's legacy save_to_disk() dereferences db.new_api,
+                # Calibre 9.15's legacy save_to_disk() dereferences db.new_api,
                 # calls get_metadata(index_is_id=True), then uses Cache-only
                 # helpers such as pref() and copy_format_to(). Keep that mixed
                 # compatibility boundary local to this adapter.
@@ -3058,12 +3607,37 @@ class CalibreRpcBridge:
                 else:
                     self._update_job(job_id, message="Cancellation requested; waiting for SMTP submission to stop cleanly")
                 return
+            if method == "download_scheduled_news":
+                self._news_context.pop(job_id, None)
+                self.calibre_jobs.pop(job_id, None)
+                self._update_job(
+                    job_id, status="cancelled", message="Native Calibre scheduled-news job was cancelled",
+                    error="JOB_CANCELLED: scheduled news download cancelled",
+                )
+                return
             self._update_job(
                 job_id,
                 status="cancelled",
                 message="Native Calibre job was cancelled",
                 error="JOB_CANCELLED: operation cancelled",
             )
+            return
+        if record["method"] == "download_scheduled_news" and getattr(native_job, "duration", None) is not None and not getattr(native_job, "is_running", False):
+            context = self._news_context.pop(job_id, {})
+            self.calibre_jobs.pop(job_id, None)
+            native_log = str(getattr(native_job, "details", "") or "")
+            if getattr(native_job, "failed", False):
+                self._update_job(
+                    job_id, status="failed", progress=1.0, message="Calibre scheduled-news job failed",
+                    error="CALIBRE_JOB_FAILED: " + (native_log or "Fetch News reported a failure"),
+                    native_log_excerpt=native_log or None,
+                )
+            else:
+                self._update_job(
+                    job_id, status="completed", progress=1.0, message="Calibre scheduled-news job completed",
+                    result={"urn": context.get("urn"), "title": context.get("title"), "native_pipeline": "FetchNewsAction/Scheduler/add_news"},
+                    native_log_excerpt=native_log or None,
+                )
             return
         progress = max(0.0, min(float(getattr(native_job, "percent", 0) or 0) / 100.0, 1.0))
         status = "running" if getattr(native_job, "is_running", False) else "queued"
@@ -3119,7 +3693,7 @@ class CalibreRpcBridge:
         job_id = self._record_job(method, params, "rejected", "Obsolete singular copy/move method rejected")
         raise BridgeMethodError(
             "UNSUPPORTED_BY_CALIBRE_VERSION",
-            f"{method} is obsolete; use the verified plural Calibre 9.12 mutation (job_id={job_id})",
+            f"{method} is obsolete; use the verified plural Calibre 9.15 mutation (job_id={job_id})",
         )
 
     def _record_job(self, method: str, params: dict[str, Any], status: str, message: str) -> str:
@@ -3139,6 +3713,7 @@ class CalibreRpcBridge:
             "params": self._safe_params(params),
             "result": None,
             "error": None,
+            "native_log_excerpt": None,
         }
         stale_contexts: list[dict[str, Any]] = []
         with self._records_lock:
@@ -3158,6 +3733,7 @@ class CalibreRpcBridge:
                 self._copy_context.pop(oldest, None)
                 self._save_context.pop(oldest, None)
                 self._email_context.pop(oldest, None)
+                self._news_context.pop(oldest, None)
                 self._clear_cancellation_tracking(oldest)
                 if context is not None:
                     stale_contexts.append(context)
@@ -3177,6 +3753,8 @@ class CalibreRpcBridge:
                 changes["result"] = self._safe_job_result(changes["result"])
             if changes.get("error") is not None:
                 changes["error"] = self._redact_public_text(str(changes["error"]))
+            if changes.get("native_log_excerpt") is not None:
+                changes["native_log_excerpt"] = self._redact_public_text(str(changes["native_log_excerpt"])[-4000:])
             record.update(changes)
             if changes.get("status") == "running" and record.get("started_at") is None:
                 record["started_at"] = time.time()

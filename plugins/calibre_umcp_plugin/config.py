@@ -20,6 +20,10 @@ class BridgeSettings:
     ui_token_configured: bool
     mutations_enabled: bool
     import_roots: tuple[str, ...]
+    import_staging_root: str | None
+    import_staging_max_bytes: int
+    import_staging_ttl_seconds: int
+    scheduled_news_disabled: dict[str, dict[str, object]]
     export_roots: tuple[str, ...]
     destination_libraries: tuple[str, ...]
     library_registry: tuple[dict[str, object], ...]
@@ -37,6 +41,10 @@ def config() -> JSONConfig:
         "token": "",
         "mutations_enabled": False,
         "import_roots": "",
+        "import_staging_root": "",
+        "import_staging_max_bytes": 104857600,
+        "import_staging_ttl_seconds": 3600,
+        "scheduled_news_disabled": "{}",
         "export_roots": "",
         "destination_libraries": "",
         "library_registry": "[]",
@@ -53,6 +61,16 @@ def _paths(value: str) -> tuple[str, ...]:
 
 
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+
+
+def _disabled_scheduled_news(value: str) -> dict[str, dict[str, object]]:
+    try:
+        raw = json.loads(value or "{}")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Disabled scheduled-news state must be a JSON object") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("Disabled scheduled-news state must be a JSON object")
+    return {str(urn): dict(item) for urn, item in raw.items() if isinstance(item, dict)}
 
 
 def _library_registry(value: str) -> tuple[dict[str, object], ...]:
@@ -106,6 +124,13 @@ def _advertised_host(value: str) -> str:
     return host
 
 
+def save_disabled_scheduled_news(value: dict[str, dict[str, object]]) -> None:
+    """Persist bridge-owned resume metadata without touching Calibre scheduler files."""
+    prefs = config()
+    prefs["scheduled_news_disabled"] = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    prefs.commit()
+
+
 def load_settings(environ=None) -> BridgeSettings:
     environ = os.environ if environ is None else environ
     prefs = config()
@@ -126,6 +151,12 @@ def load_settings(environ=None) -> BridgeSettings:
             and (not environment_token or environment_token == ui_token)
         ),
         import_roots=_paths(str(prefs["import_roots"] or "")),
+        import_staging_root=(
+            os.path.realpath(os.path.expanduser(str(prefs["import_staging_root"] or "").strip())) or None
+        ),
+        import_staging_max_bytes=max(1_024, min(int(prefs["import_staging_max_bytes"] or 104857600), 1_073_741_824)),
+        import_staging_ttl_seconds=max(60, min(int(prefs["import_staging_ttl_seconds"] or 3600), 86_400)),
+        scheduled_news_disabled=_disabled_scheduled_news(str(prefs["scheduled_news_disabled"] or "{}")),
         export_roots=_paths(str(prefs["export_roots"] or "")),
         destination_libraries=_paths(str(prefs["destination_libraries"] or "")),
         library_registry=_library_registry(str(prefs["library_registry"] or "[]")),

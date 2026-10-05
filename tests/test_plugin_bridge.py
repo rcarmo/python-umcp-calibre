@@ -1,4 +1,6 @@
+import base64
 import copy
+import hashlib
 import io
 import json
 import os
@@ -310,11 +312,108 @@ class FakeJobManager:
         job.callback(job)
 
 
+class FakeScheduledRecipe:
+    def __init__(self, urn, title, last_downloaded="2026-08-30T12:00:00Z"):
+        self.values = {"id": urn, "title": title, "last_downloaded": last_downloaded}
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+
+class FakeSchedulerConfig:
+    def __init__(self, entries):
+        self.entries = entries
+
+    def iter_recipes(self):
+        return list(self.entries)
+
+
+class FakeRecipeModel:
+    def __init__(self, entries):
+        self.scheduler_config = FakeSchedulerConfig(entries)
+        self.schedule_info = {"custom:1000": ("days_of_week", [[5], 6, 0])}
+        self.schedule_calls = []
+        self.un_schedule_calls = []
+        self.fail_un_schedule = False
+
+    def recipe_from_urn(self, urn):
+        return {"title": "Scheduled Economist"} if urn == "custom:1000" else None
+
+    def schedule_info_from_urn(self, urn):
+        return self.schedule_info.get(urn)
+
+    def schedule_recipe(self, urn, schedule_type, schedule):
+        if urn not in self.schedule_info:
+            raise ValueError("unknown recipe")
+        normalized = [list(schedule[0]), int(schedule[1]), int(schedule[2])]
+        self.schedule_calls.append((urn, schedule_type, normalized))
+        self.schedule_info[urn] = (schedule_type, normalized)
+
+    def un_schedule_recipe(self, urn):
+        if urn not in self.schedule_info:
+            raise ValueError("unknown recipe")
+        if self.fail_un_schedule:
+            raise RuntimeError("scheduler write failed")
+        self.un_schedule_calls.append(urn)
+        self.schedule_info.pop(urn)
+
+    def get_customize_info(self, urn):
+        return SimpleNamespace(keep_issues=4, custom_tags=("News",), add_title_tag=True)
+
+
+class FakeScheduler:
+    def __init__(self, action, entries):
+        self.action = action
+        self.recipe_model = FakeRecipeModel(entries)
+        self.download_queue = set()
+
+    def download(self, urn):
+        if urn in self.download_queue:
+            return False
+        self.download_queue.add(urn)
+        job = FakeNativeJob(len(self.action.gui.job_manager.jobs) + 1, lambda _job: None, f"Fetch {urn}")
+        self.action.gui.job_manager.jobs.append(job)
+        self.action.conversion_jobs[job] = ((), "EPUB", {"urn": urn})
+        return True
+
+
+class FakeQueuedScheduler(FakeScheduler):
+    """Model Calibre 9.15's queued start_recipe_fetch signal delivery."""
+
+    def __init__(self, action, entries):
+        super().__init__(action, entries)
+        self._pending_urn = None
+
+    def download(self, urn):
+        if urn in self.download_queue:
+            return False
+        self.download_queue.add(urn)
+        self._pending_urn = urn
+        return True
+
+    def deliver_pending(self):
+        urn, self._pending_urn = self._pending_urn, None
+        if urn is None:
+            return
+        job = FakeNativeJob(len(self.action.gui.job_manager.jobs) + 1, lambda _job: None, f"Fetch {urn}")
+        self.action.gui.job_manager.jobs.append(job)
+        self.action.conversion_jobs[job] = ((), "EPUB", {"urn": urn})
+
+
+class FakeFetchNewsAction:
+    def __init__(self, gui, queued=False):
+        self.gui = gui
+        self.conversion_jobs = {}
+        scheduler_class = FakeQueuedScheduler if queued else FakeScheduler
+        self.scheduler = scheduler_class(self, [FakeScheduledRecipe("custom:1000", "Scheduled Economist")])
+
+
 class FakeGui:
-    def __init__(self, job_manager=None):
+    def __init__(self, job_manager=None, with_news=False, queued_news=False):
         self.current_db = FakeDb()
         self.library_view = FakeView()
         self.job_manager = job_manager or FakeJobManager()
+        self.iactions = {"Fetch News": FakeFetchNewsAction(self, queued=queued_news)} if with_news else {}
 
 
 class CalibreRpcBridgeTests(unittest.TestCase):
@@ -839,15 +938,20 @@ class CalibreRpcBridgeTests(unittest.TestCase):
             bridge.call_serialized("ping", {})
         self.assertEqual(caught.exception.code, "BRIDGE_SHUTTING_DOWN")
 
-    def test_mutations_fail_closed_outside_exact_calibre_9_12_0(self):
+    def test_mutations_require_exact_calibre_9_15_0(self):
         calibre = types.ModuleType("calibre")
         calibre.__path__ = []
         constants = types.ModuleType("calibre.constants")
-        constants.numeric_version = (9, 12, 1)
-        with patch.dict(sys.modules, {"calibre": calibre, "calibre.constants": constants}):
-            with self.assertRaises(BridgeMethodError) as caught:
-                CalibreRpcBridge(FakeGui())._new_api()
-        self.assertEqual(caught.exception.code, "UNSUPPORTED_BY_CALIBRE_VERSION")
+        for version, supported in (((9, 15, 0), True), ((9, 12, 0), False), ((9, 15, 1), False)):
+            constants.numeric_version = version
+            with patch.dict(sys.modules, {"calibre": calibre, "calibre.constants": constants}):
+                bridge = CalibreRpcBridge(FakeGui())
+                if supported:
+                    self.assertIs(bridge._new_api(), bridge.gui.current_db.new_api)
+                else:
+                    with self.assertRaises(BridgeMethodError) as caught:
+                        bridge._new_api()
+                    self.assertEqual(caught.exception.code, "UNSUPPORTED_BY_CALIBRE_VERSION")
 
     def test_metadata_mutation_updates_supported_fields_and_refreshes(self):
         gui = FakeGui()
@@ -904,6 +1008,260 @@ class CalibreRpcBridgeTests(unittest.TestCase):
         with self.assertRaises(BridgeMethodError) as composite:
             bridge.dispatch("update_book_metadata", {"book_id": 1, "changes": {"custom": {"#computed": "No"}}})
         self.assertEqual(composite.exception.code, "POLICY_DENIED")
+
+    def test_attachment_staging_is_bounded_one_time_and_can_replace_a_format(self):
+        gui = FakeGui()
+        with tempfile.TemporaryDirectory() as root:
+            bridge = CalibreRpcBridge(gui, import_staging_root=root, import_staging_max_bytes=32, import_staging_ttl_seconds=60)
+            staged = bridge.dispatch("stage_import_attachment", {
+                "filename": "replacement.epub", "content_base64": base64.b64encode(b"new epub").decode(),
+            })
+            self.assertTrue(staged["staged_handle"].startswith("stage:"))
+            self.assertEqual(staged["format"], "EPUB")
+            self.assertTrue(Path(root).glob("*.epub"))
+            completed = bridge.dispatch("add_book_format", {"book_id": 1, "staged_handle": staged["staged_handle"], "replace": True})
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(gui.current_db.new_api.format(1, "EPUB"), b"new epub")
+            self.assertFalse(list(Path(root).glob("*.epub")))
+            self.assertFalse(list(Path(root).glob("*.ready")))
+            self.assertFalse(list(Path(root).glob("*.ready")))
+            with self.assertRaises(BridgeMethodError) as reused:
+                bridge.dispatch("add_book_format", {"book_id": 1, "staged_handle": staged["staged_handle"], "replace": True})
+            self.assertEqual(reused.exception.code, "STAGING_HANDLE_INVALID")
+            with self.assertRaises(BridgeMethodError) as too_big:
+                bridge.dispatch("stage_import_attachment", {
+                    "filename": "too-big.epub", "content_base64": base64.b64encode(b"x" * 33).decode(),
+                })
+            self.assertEqual(too_big.exception.code, "STAGING_LIMIT_EXCEEDED")
+            with self.assertRaises(BridgeMethodError) as invalid_name:
+                bridge.dispatch("stage_import_attachment", {"filename": "../escape.epub", "content_base64": "eA=="})
+            self.assertEqual(invalid_name.exception.code, "POLICY_DENIED")
+
+    def test_chunked_attachment_staging_is_checksum_verified_and_one_time(self):
+        gui = FakeGui()
+        payload = b"chunked epub payload"
+        digest = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as root:
+            bridge = CalibreRpcBridge(gui, import_staging_root=root, import_staging_max_bytes=128, import_staging_ttl_seconds=60)
+            begin = bridge.dispatch("begin_import_attachment", {"filename": "chunked.epub", "size_bytes": len(payload), "sha256": digest})
+            self.assertEqual(begin["chunk_max_bytes"], 128)
+            bridge.dispatch("append_import_attachment", {"upload_handle": begin["upload_handle"], "content_base64": base64.b64encode(payload[:7]).decode()})
+            bridge.dispatch("append_import_attachment", {"upload_handle": begin["upload_handle"], "content_base64": base64.b64encode(payload[7:]).decode()})
+            staged = bridge.dispatch("finalize_import_attachment", {"upload_handle": begin["upload_handle"]})
+            self.assertEqual(staged["sha256"], digest)
+            self.assertTrue(bridge.import_staging_handles[staged["staged_handle"]]["path"].endswith(".ready"))
+            self.assertEqual(Path(bridge.import_staging_handles[staged["staged_handle"]]["path"]).read_bytes(), payload)
+            with self.assertRaises(BridgeMethodError) as reused:
+                bridge.dispatch("finalize_import_attachment", {"upload_handle": begin["upload_handle"]})
+            self.assertEqual(reused.exception.code, "STAGING_HANDLE_INVALID")
+            bad = bridge.dispatch("begin_import_attachment", {"filename": "bad.epub", "size_bytes": 1, "sha256": "0" * 64})
+            bridge.dispatch("append_import_attachment", {"upload_handle": bad["upload_handle"], "content_base64": "eA=="})
+            with self.assertRaises(BridgeMethodError) as mismatch:
+                bridge.dispatch("finalize_import_attachment", {"upload_handle": bad["upload_handle"]})
+            self.assertEqual(mismatch.exception.code, "STAGING_UPLOAD_CONFLICT")
+
+    def test_chunked_attachment_incomplete_finalization_removes_part_file(self):
+        gui = FakeGui()
+        payload = b"expected payload"
+        with tempfile.TemporaryDirectory() as root:
+            bridge = CalibreRpcBridge(gui, import_staging_root=root, import_staging_max_bytes=128, import_staging_ttl_seconds=60)
+            begin = bridge.dispatch("begin_import_attachment", {
+                "filename": "incomplete.epub", "size_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            })
+            bridge.dispatch("append_import_attachment", {
+                "upload_handle": begin["upload_handle"],
+                "content_base64": base64.b64encode(payload[:4]).decode(),
+            })
+            with self.assertRaises(BridgeMethodError) as incomplete:
+                bridge.dispatch("finalize_import_attachment", {"upload_handle": begin["upload_handle"]})
+            self.assertEqual(incomplete.exception.code, "STAGING_UPLOAD_INCOMPLETE")
+            self.assertFalse(list(Path(root).iterdir()))
+
+    def test_attachment_staging_can_queue_a_native_book_import(self):
+        gui = FakeGui()
+        with tempfile.TemporaryDirectory() as root:
+            bridge = CalibreRpcBridge(
+                gui, import_staging_root=root,
+                import_adapter=lambda path, fmt: FakeMetadata("Staged", ["Writer"]),
+                threaded_job_factory=self.threaded_job_factory,
+            )
+            staged = bridge.dispatch("stage_import_attachment", {"filename": "staged.epub", "content_base64": "bmV3IGVwdWI="})
+            queued = bridge.dispatch("add_book", {"staged_handle": staged["staged_handle"], "duplicate_policy": "reject"})
+            self.assertEqual(queued["status"], "queued")
+            gui.job_manager.jobs[-1].execute()
+            done = bridge.dispatch("get_job_status", {"job_id": queued["id"]})
+            self.assertEqual(done["status"], "completed")
+            self.assertFalse(list(Path(root).glob("*.epub")))
+            self.assertFalse(list(Path(root).glob("*.ready")))
+            self.assertFalse(list(Path(root).glob("*.ready")))
+
+    def test_scheduled_news_lists_configured_recipes_and_queues_native_scheduler(self):
+        gui = FakeGui(with_news=True)
+        bridge = CalibreRpcBridge(gui)
+        listed = bridge.dispatch("list_scheduled_news", {})
+        self.assertEqual(listed["items"][0]["urn"], "custom:1000")
+        self.assertEqual(listed["items"][0]["keep_issues"], 4)
+        queued = bridge.dispatch("download_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(queued["result"]["native_pipeline"], "FetchNewsAction/Scheduler/add_news")
+        self.assertEqual(queued["calibre_job_id"], 1)
+        with self.assertRaises(BridgeMethodError) as conflict:
+            bridge.dispatch("download_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(conflict.exception.code, "NEWS_QUEUE_CONFLICT")
+        with self.assertRaises(BridgeMethodError) as absent:
+            bridge.dispatch("download_scheduled_news", {"urn": "builtin:economist"})
+        self.assertEqual(absent.exception.code, "NEWS_NOT_SCHEDULED")
+
+    def test_scheduled_news_item_accepts_childless_calibre_recipe_element(self):
+        class ChildlessRecipe:
+            def get(self, field, default=None):
+                return {"title": "The Economist"}.get(field, default)
+
+            def __bool__(self):
+                return False
+
+        class Model:
+            def recipe_from_urn(self, urn):
+                return ChildlessRecipe() if urn == "custom:1000" else None
+
+            def schedule_info_from_urn(self, urn):
+                return ["days_of_week", [[4], 10, 0]]
+
+            def get_customize_info(self, urn):
+                return types.SimpleNamespace(keep_issues=0, custom_tags=(), add_title_tag=True)
+
+        item = CalibreRpcBridge._scheduled_news_item(Model(), "custom:1000")
+        self.assertEqual(item["title"], "The Economist")
+        self.assertTrue(item["enabled"])
+
+    def test_scheduled_news_disable_uses_native_model_and_retains_discovery_state(self):
+        gui = FakeGui(with_news=True)
+        saved_states = []
+        bridge = CalibreRpcBridge(
+            gui,
+            scheduled_news_disabled_save_adapter=lambda value: saved_states.append(value),
+        )
+        before = bridge.dispatch("list_scheduled_news", {})["items"][0]
+        disabled = bridge.dispatch("disable_scheduled_news", {"urn": "custom:1000"})
+        after = bridge.dispatch("list_scheduled_news", {})["items"][0]
+
+        self.assertEqual(disabled["status"], "completed")
+        self.assertTrue(disabled["result"]["changed"])
+        self.assertEqual(disabled["result"]["previous_schedule"], {
+            "schedule_type": "days_of_week", "schedule": [[5], 6, 0],
+            "last_downloaded": "2026-08-30T12:00:00Z",
+        })
+        self.assertEqual(gui.iactions["Fetch News"].scheduler.recipe_model.un_schedule_calls, ["custom:1000"])
+        self.assertFalse(after["enabled"])
+        self.assertEqual(after["previous_schedule"], [[5], 6, 0])
+        self.assertEqual(after["last_downloaded"], before["last_downloaded"])
+        self.assertEqual(after["keep_issues"], before["keep_issues"])
+        self.assertEqual(after["custom_tags"], before["custom_tags"])
+        self.assertTrue(saved_states[0]["custom:1000"])
+
+        repeated = bridge.dispatch("disable_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(repeated["status"], "completed")
+        self.assertFalse(repeated["result"]["changed"])
+        self.assertEqual(repeated["result"]["previous_schedule"], saved_states[0]["custom:1000"])
+        with self.assertRaises(BridgeMethodError) as disabled_download:
+            bridge.dispatch("download_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(disabled_download.exception.code, "NEWS_NOT_SCHEDULED")
+        with self.assertRaises(BridgeMethodError) as disabled_update:
+            bridge.dispatch(
+                "update_scheduled_news_schedule",
+                {"urn": "custom:1000", "days_of_week": [4], "hour": 10, "minute": 0},
+            )
+        self.assertEqual(disabled_update.exception.code, "NEWS_NOT_SCHEDULED")
+
+    def test_scheduled_news_disable_rejects_unknown_or_active_recipe_and_rolls_back(self):
+        gui = FakeGui(with_news=True)
+        bridge = CalibreRpcBridge(gui)
+        with self.assertRaises(BridgeMethodError) as unknown:
+            bridge.dispatch("disable_scheduled_news", {"urn": "custom:404"})
+        self.assertEqual(unknown.exception.code, "NEWS_RECIPE_UNKNOWN")
+
+        gui.iactions["Fetch News"].scheduler.download_queue.add("custom:1000")
+        with self.assertRaises(BridgeMethodError) as queued:
+            bridge.dispatch("disable_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(queued.exception.code, "NEWS_QUEUE_CONFLICT")
+        gui.iactions["Fetch News"].scheduler.download_queue.clear()
+
+        gui.iactions["Fetch News"].scheduler.recipe_model.fail_un_schedule = True
+        with self.assertRaises(BridgeMethodError) as failed:
+            bridge.dispatch("disable_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(failed.exception.code, "NEWS_SCHEDULER_UNAVAILABLE")
+        self.assertTrue(bridge.dispatch("list_scheduled_news", {})["items"][0]["enabled"])
+
+        persisted = {"custom:other": {"schedule_type": "days_of_week", "schedule": [[1], 9, 0], "last_downloaded": ""}}
+        saved_states = []
+        bridge = CalibreRpcBridge(
+            FakeGui(with_news=True),
+            scheduled_news_disabled=persisted,
+            scheduled_news_disabled_save_adapter=lambda value: saved_states.append(value),
+        )
+        bridge.gui.iactions["Fetch News"].scheduler.recipe_model.fail_un_schedule = True
+        with self.assertRaises(BridgeMethodError):
+            bridge.dispatch("disable_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(saved_states[-1], persisted)
+
+    def test_scheduled_news_schedule_uses_native_model_and_preserves_other_settings(self):
+        gui = FakeGui(with_news=True)
+        bridge = CalibreRpcBridge(gui)
+        before = bridge.dispatch("list_scheduled_news", {})["items"][0]
+        updated = bridge.dispatch(
+            "update_scheduled_news_schedule",
+            {"urn": "custom:1000", "days_of_week": [4], "hour": 10, "minute": 0},
+        )
+        after = bridge.dispatch("list_scheduled_news", {})["items"][0]
+
+        self.assertEqual(updated["status"], "completed")
+        self.assertEqual(updated["result"]["schedule_type"], "days_of_week")
+        self.assertEqual(updated["result"]["schedule"], [[4], 10, 0])
+        self.assertEqual(gui.iactions["Fetch News"].scheduler.recipe_model.schedule_calls, [
+            ("custom:1000", "days_of_week", [[4], 10, 0]),
+        ])
+        for field in ("urn", "title", "last_downloaded", "keep_issues", "custom_tags", "add_title_tag"):
+            self.assertEqual(after[field], before[field])
+
+    def test_scheduled_news_schedule_rejects_invalid_values_and_unscheduled_recipes(self):
+        bridge = CalibreRpcBridge(FakeGui(with_news=True))
+        for params in (
+            {"urn": "custom:1000", "days_of_week": [7], "hour": 10, "minute": 0},
+            {"urn": "custom:1000", "days_of_week": [4, 4], "hour": 10, "minute": 0},
+            {"urn": "custom:1000", "days_of_week": [4], "hour": 24, "minute": 0},
+            {"urn": "custom:1000", "days_of_week": [4], "hour": 10, "minute": 60},
+        ):
+            with self.assertRaises(BridgeMethodError) as caught:
+                bridge.dispatch("update_scheduled_news_schedule", params)
+            self.assertEqual(caught.exception.code, "POLICY_DENIED")
+        with self.assertRaises(BridgeMethodError) as absent:
+            bridge.dispatch(
+                "update_scheduled_news_schedule",
+                {"urn": "builtin:economist", "days_of_week": [4], "hour": 10, "minute": 0},
+            )
+        self.assertEqual(absent.exception.code, "NEWS_NOT_SCHEDULED")
+
+    def test_scheduled_news_waits_for_queued_calibre_signal_delivery(self):
+        gui = FakeGui(with_news=True, queued_news=True)
+        bridge = CalibreRpcBridge(gui)
+        scheduler = gui.iactions["Fetch News"].scheduler
+
+        def wait_for_native_job(action, before, urn):
+            scheduler.deliver_pending()
+            return bridge._scheduled_news_job_for_urn(action, before, urn)
+
+        bridge._wait_for_scheduled_news_job = wait_for_native_job
+        queued = bridge.dispatch("download_scheduled_news", {"urn": "custom:1000"})
+        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(queued["calibre_job_id"], 1)
+        self.assertIn(queued["id"], bridge.calibre_jobs)
+
+    def test_scheduled_news_fails_closed_without_calibre_scheduler(self):
+        bridge = CalibreRpcBridge(FakeGui())
+        with self.assertRaises(BridgeMethodError) as caught:
+            bridge.dispatch("list_scheduled_news", {})
+        self.assertEqual(caught.exception.code, "NEWS_SCHEDULER_UNAVAILABLE")
 
     def test_add_format_confines_paths_and_preserves_replacement_on_failure(self):
         gui = FakeGui()

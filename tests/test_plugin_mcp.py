@@ -20,6 +20,11 @@ class PluginMCPTests(unittest.TestCase):
         "add_book_format_mutation",
         "delete_book_format_mutation",
         "set_book_cover_mutation",
+        "begin_import_attachment_mutation",
+        "stage_import_attachment_mutation",
+        "download_scheduled_news_mutation",
+        "update_scheduled_news_schedule_mutation",
+        "disable_scheduled_news_mutation",
         "add_book_mutation",
         "delete_books_mutation",
         "merge_duplicates_mutation",
@@ -78,7 +83,7 @@ class PluginMCPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "calibre-umcp")
         self.assertEqual(initialized["result"]["serverInfo"]["schemaVersion"], "2")
-        self.assertEqual(initialized["result"]["serverInfo"]["toolsetVersion"], "5")
+        self.assertEqual(initialized["result"]["serverInfo"]["toolsetVersion"], "9")
         self.assertEqual(initialized["result"]["capabilities"], {"tools": {"listChanged": False}})
 
         _, listed = self.post(base, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
@@ -115,7 +120,7 @@ class PluginMCPTests(unittest.TestCase):
         )
         content = capabilities["result"]["structuredContent"]
         self.assertEqual(content["schema_version"], 2)
-        self.assertEqual(content["toolset_version"], 5)
+        self.assertEqual(content["toolset_version"], 9)
         self.assertFalse(content["cross_library_configured"])
         self.assertFalse(content["cross_library_available"])
         self.assertEqual(content["readable_target_count"], 0)
@@ -191,6 +196,11 @@ class PluginMCPTests(unittest.TestCase):
             ("add_book_format", lambda: server.tool_add_book_format_mutation(1, "/tmp/book.epub", format="EPUB", replace=True, expected_active_library="current", expected_active_generation=7)),
             ("delete_book_format", lambda: server.tool_delete_book_format_mutation(1, "EPUB", allow_last_format=True, expected_active_library="current", expected_active_generation=7)),
             ("set_book_cover", lambda: server.tool_set_book_cover_mutation(1, "/tmp/cover.jpg", expected_active_library="current", expected_active_generation=7)),
+            ("begin_import_attachment", lambda: server.tool_begin_import_attachment_mutation("book.epub", 10, "0" * 64, expected_active_library="current", expected_active_generation=7)),
+            ("stage_import_attachment", lambda: server.tool_stage_import_attachment_mutation("book.epub", "eA==", expected_active_library="current", expected_active_generation=7)),
+            ("download_scheduled_news", lambda: server.tool_download_scheduled_news_mutation("custom:1000", expected_active_library="current", expected_active_generation=7)),
+            ("update_scheduled_news_schedule", lambda: server.tool_update_scheduled_news_schedule_mutation("custom:1000", [4], 10, 0, expected_active_library="current", expected_active_generation=7)),
+            ("disable_scheduled_news", lambda: server.tool_disable_scheduled_news_mutation("custom:1000", expected_active_library="current", expected_active_generation=7)),
             ("add_book", lambda: server.tool_add_book_mutation("/tmp/book.epub", format="EPUB", duplicate_policy="add", expected_active_library="current", expected_active_generation=7)),
             ("delete_books", lambda: server.tool_delete_books_mutation([1], dry_run=False, confirmation="confirmed", permanent=True, expected_active_library="current", expected_active_generation=7)),
             ("merge_duplicates", lambda: server.tool_merge_duplicates_mutation(1, [2], "MERGE_KEEP_SOURCES", replace_cover=True, save_alternate_cover=True, expected_active_library="current", expected_active_generation=7)),
@@ -234,20 +244,21 @@ class PluginMCPTests(unittest.TestCase):
                 invoke()
             self.assertIn("ACTIVE_LIBRARY_GENERATION_MISMATCH", str(caught.exception))
 
-    def test_mutation_discovery_fails_closed_outside_exact_calibre_9_12_0(self):
+    def test_mutation_discovery_requires_exact_calibre_9_15_0(self):
         calibre = types.ModuleType("calibre")
         calibre.__path__ = []
         constants = types.ModuleType("calibre.constants")
-        constants.numeric_version = (9, 12, 1)
-        with patch.dict(sys.modules, {"calibre": calibre, "calibre.constants": constants}):
-            server = CalibrePluginMCPServer(
-                FakeGui(), token="ui-token", ui_token_configured=True, mutations_enabled=True
-            )
-        self.addCleanup(server.bridge.close)
-        names = {tool["name"] for tool in server.discover_tools()["tools"]}
-        self.assertFalse(server.mutation_runtime_supported)
-        self.assertNotIn("capabilities_mutation", names)
-        self.assertNotIn("update_book_metadata_mutation", names)
+        for version, supported in (((9, 15, 0), True), ((9, 12, 0), False), ((9, 15, 1), False)):
+            constants.numeric_version = version
+            with patch.dict(sys.modules, {"calibre": calibre, "calibre.constants": constants}):
+                server = CalibrePluginMCPServer(
+                    FakeGui(), token="ui-token", ui_token_configured=True, mutations_enabled=True
+                )
+            self.addCleanup(server.bridge.close)
+            names = {tool["name"] for tool in server.discover_tools()["tools"]}
+            self.assertEqual(server.mutation_runtime_supported, supported)
+            self.assertEqual("capabilities_mutation" in names, supported)
+            self.assertEqual("update_book_metadata_mutation" in names, supported)
 
     def test_missing_readonly_job_preserves_stable_error_code(self):
         server = CalibrePluginMCPServer(FakeGui())

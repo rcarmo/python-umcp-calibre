@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from threading import Lock
 from types import MappingProxyType
-from typing import Any, Callable, Mapping
+from typing import Any
 from urllib.parse import urlparse, urlsplit
 
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-03-26", "2024-11-05")
@@ -16,6 +17,7 @@ SINGLETON_HTTP_HEADERS = frozenset({
     "accept",
     "content-type",
     "mcp-protocol-version",
+    "mcp-session-id",
     "content-length",
     "transfer-encoding",
 })
@@ -82,9 +84,9 @@ class MCPRequestCancelled(RuntimeError):
     pass
 
 
-_request_context: ContextVar[MCPRequestContext] = ContextVar(
+_request_context: ContextVar[MCPRequestContext | None] = ContextVar(
     "umcp_request_context",
-    default=MCPRequestContext(),
+    default=None,
 )
 
 _request_runtime: ContextVar[MCPRequestRuntime | None] = ContextVar(
@@ -102,7 +104,7 @@ def reset_request_context(token) -> None:
 
 
 def get_request_context() -> MCPRequestContext:
-    return _request_context.get()
+    return _request_context.get() or MCPRequestContext()
 
 
 def set_request_runtime(runtime: MCPRequestRuntime | None):
@@ -138,6 +140,22 @@ def exact_or_fallback(accepted: str | None, preferred: str) -> str:
     if accepted in SUPPORTED_PROTOCOL_VERSIONS:
         return accepted  # exact match
     return preferred
+
+
+def protocol_version_error(version: str | None) -> dict[str, object]:
+    """Build an actionable HTTP error for a missing or unsupported MCP version."""
+    payload: dict[str, object] = {
+        "error": (
+            "missing MCP-Protocol-Version header"
+            if version is None
+            else "unsupported MCP-Protocol-Version header"
+        ),
+        "expected": SUPPORTED_PROTOCOL_VERSIONS[0],
+        "supported": list(SUPPORTED_PROTOCOL_VERSIONS),
+    }
+    if version is not None:
+        payload["received"] = version
+    return payload
 
 
 def is_jsonrpc_object(value: Any) -> bool:
@@ -219,7 +237,7 @@ def request_target_path(target: str) -> str:
 def has_ambiguous_singleton_values(headers: Mapping[str, str]) -> bool:
     """Reject comma-joined values for headers that cannot be safely combined."""
     comma_forbidden = {
-        "host", "authorization", "origin", "mcp-protocol-version", "content-length",
+        "host", "authorization", "origin", "mcp-protocol-version", "mcp-session-id", "content-length",
     }
     return any("," in headers.get(name, "") for name in comma_forbidden)
 
@@ -260,7 +278,7 @@ def origin_is_allowed(
     if parsed.path or parsed.params or parsed.query or parsed.fragment:
         return False
     try:
-        parsed.port
+        _ = parsed.port
     except ValueError:
         return False
     if origin in allowed_origins:
