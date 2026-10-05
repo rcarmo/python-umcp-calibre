@@ -4,13 +4,22 @@
 set -eu
 
 SOURCE_BASE=${SOURCE_BASE:-https://raw.githubusercontent.com/rcarmo/python-umcp-calibre/main}
-WORK=${WORK:-/tmp/calibre-umcp-plugin-src}
-OUT=${OUT:-/tmp/calibre-umcp-plugin.zip}
+PROJECT_TMP_ROOT=${PROJECT_TMP_ROOT:-/workspace/tmp/calibre-umcp}
+WORK=${WORK:-$PROJECT_TMP_ROOT/runs/plugin-install/current/source}
+OUT=${OUT:-$PROJECT_TMP_ROOT/build/calibre-umcp-plugin.zip}
 CALIBRE_USER=${CALIBRE_USER:-abc}
 CALIBRE_GROUP=${CALIBRE_GROUP:-users}
+export WORK OUT
 
+case "$PROJECT_TMP_ROOT" in
+  /workspace/tmp/calibre-umcp|*/calibre-umcp) ;;
+  *) echo "PROJECT_TMP_ROOT must end in /calibre-umcp" >&2; exit 1 ;;
+esac
+for path in "$PROJECT_TMP_ROOT" "$PROJECT_TMP_ROOT/cache" "$PROJECT_TMP_ROOT/build" "$PROJECT_TMP_ROOT/runs"; do
+  test ! -L "$path" || { echo "Refusing symlink scratch path: $path" >&2; exit 1; }
+done
 rm -rf "$WORK"
-mkdir -p "$WORK"
+mkdir -p "$WORK" "$(dirname "$OUT")"
 
 for file in __init__.py bridge.py config.py mcp.py ui.py; do
   curl -fsSL \
@@ -28,8 +37,8 @@ python3 - <<'PY'
 import os
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
-work = Path(os.environ.get('WORK', '/tmp/calibre-umcp-plugin-src'))
-out = Path(os.environ.get('OUT', '/tmp/calibre-umcp-plugin.zip'))
+work = Path(os.environ['WORK'])
+out = Path(os.environ['OUT'])
 with ZipFile(out, 'w', ZIP_DEFLATED) as zf:
     for name in (
         '__init__.py',

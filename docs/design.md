@@ -59,4 +59,4 @@ Neither of those is the released mutation surface, and the legacy mutator names 
 
 ## Packaging Paths
 
-`plugins/build-plugin.sh` builds from the local checkout and produces `plugins/calibre-umcp-plugin.zip`. `plugins/install-from-gitea.sh` fetches the same seven files from a remote source, assembles a ZIP inside a Calibre container, and then installs it. Despite the script name, its default `SOURCE_BASE` points at the repository's raw GitHub URL unless you override it.
+`make build` invokes `plugins/build-plugin.sh` and produces `/workspace/tmp/calibre-umcp/build/calibre-umcp-plugin.zip`. `plugins/install-from-gitea.sh` fetches the same seven files from a remote source, assembles a ZIP under the canonical project scratch hierarchy inside a Calibre container, and then installs it. Despite the script name, its default `SOURCE_BASE` points at the repository's raw GitHub URL unless you override it. Containers without `/workspace/tmp` require an explicit `PROJECT_TMP_ROOT` mapping ending in `/calibre-umcp`.

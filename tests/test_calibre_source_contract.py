@@ -4,7 +4,10 @@ import unittest
 from pathlib import Path
 
 
-SOURCE_ROOT = Path(os.environ.get("CALIBRE_SOURCE_ROOT", "/tmp/calibre-source/src"))
+SOURCE_ROOT = Path(os.environ.get(
+    "CALIBRE_SOURCE_ROOT",
+    "/workspace/tmp/calibre-umcp/cache/calibre-source/src",
+))
 
 
 @unittest.skipUnless(SOURCE_ROOT.is_dir(), "Calibre source tree is not available")

@@ -5,7 +5,7 @@ This Interface Action plugin runs `umcp.MCPServer` inside the Calibre GUI proces
 ## Building The ZIP
 
 ```sh
-sh plugins/build-plugin.sh
+make build
 ```
 
 The resulting `plugins/calibre-umcp-plugin.zip` contains the plugin package files (`__init__.py`, `bridge.py`, `config.py`, `mcp.py` and `ui.py`), Calibre's `plugin-import-name-calibre_umcp_plugin.txt` namespace marker, and `umcp.py` plus `umcp_shared.py`. The last two are copied from the canonical runtime under `src/calibre_umcp` during packaging and removed from the plugin source directory afterwards.
@@ -20,9 +20,9 @@ s6-setuidgid abc calibre-customize -a plugins/calibre-umcp-plugin.zip
 
 Restart or reload Calibre. The plugin tries to start MCP about a second after initialisation, once it can resolve the active library. If that does not happen -- usually because the bind or token settings still need fixing -- the `µMCP Bridge` menu exposes Status, Configure, Stop and Start actions for a manual retry.
 
-For installations without a checkout, `plugins/install-from-gitea.sh` fetches the seven source files, adds the Calibre namespace marker, builds `/tmp/calibre-umcp-plugin.zip` and installs it with `calibre-customize`. Despite the script name, its default `SOURCE_BASE` points at the repository's raw GitHub URL unless you override it.
+For installations without a checkout, `plugins/install-from-gitea.sh` fetches the seven source files, adds the Calibre namespace marker, builds `/workspace/tmp/calibre-umcp/build/calibre-umcp-plugin.zip` and installs it with `calibre-customize`. Despite the script name, its default `SOURCE_BASE` points at the repository's raw GitHub URL unless you override it.
 
-Override `SOURCE_BASE`, `WORK`, `OUT`, `CALIBRE_USER` or `CALIBRE_GROUP` when you need a different source or container layout.
+Override `SOURCE_BASE`, `CALIBRE_USER` or `CALIBRE_GROUP` when needed. For a container without `/workspace/tmp`, explicitly map `PROJECT_TMP_ROOT` to a container-owned path ending in `/calibre-umcp`; `WORK` and `OUT` may then select paths within its `runs/` and `build/` hierarchy.
 
 ## Binding And Authentication
 

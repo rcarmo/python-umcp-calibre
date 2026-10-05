@@ -63,8 +63,8 @@ This release is source-contract and runtime tested against exactly Calibre 9.12.
 ## Building It
 
 ```sh
-PYTHONPATH=.:src python3 -W error::ResourceWarning -m unittest discover -s tests -v
-sh plugins/build-plugin.sh
+make test
+make build
 ```
 
 The build produces `plugins/calibre-umcp-plugin.zip`. It copies `umcp.py` and `umcp_shared.py` from `src/calibre_umcp` into the archive, so the plugin uses the same runtime as the rest of the repository rather than carrying a second protocol implementation.
