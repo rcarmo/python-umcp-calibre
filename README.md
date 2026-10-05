@@ -137,7 +137,7 @@ The test suite uses Python's `unittest` runner:
 make test
 ```
 
-This retains CPU and allocation evidence under `evidence/test-profiles/<run-id>/`. Build the plugin ZIP with:
+Ordinary development tests do not profile. Before a release, run `make prerelease-test`; it prints CPU cumulative and allocation hotspot summaries, then deletes the raw captures immediately. Build the plugin ZIP with:
 
 ```sh
 make build

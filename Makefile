@@ -14,8 +14,7 @@ LOG_ROOT := $(PROJECT_TMP_ROOT)/logs
 RUN_ROOT := $(PROJECT_TMP_ROOT)/runs
 RUN_ID ?= $(shell date -u +%Y%m%dT%H%M%S%NZ)
 RUN_DIR := $(TEST_ROOT)/$(RUN_ID)
-PROFILE_ROOT := evidence/test-profiles
-PROFILE_DIR := $(PROFILE_ROOT)/$(RUN_ID)
+PROFILE_DIR := $(RUN_ROOT)/pre-release/$(RUN_ID)/profiles
 
 export PROJECT_TMP_ROOT CACHE_ROOT BUILD_ROOT TEST_ROOT LOG_ROOT RUN_ROOT PROFILE_DIR
 export TMPDIR := $(RUN_DIR)/tmp
@@ -24,7 +23,7 @@ export TEMP := $(TMPDIR)
 export PYTHONPYCACHEPREFIX := $(CACHE_ROOT)/python/pycache
 export PIP_CACHE_DIR := $(CACHE_ROOT)/pip
 
-.PHONY: paths init test build clean
+.PHONY: paths init test prerelease-test build clean
 
 paths:
 	@scripts/project-tmp.sh paths
@@ -34,9 +33,12 @@ init:
 	@mkdir -p "$(CACHE_ROOT)/python" "$(CACHE_ROOT)/pip"
 
 test: init
-	@mkdir -p "$(TMPDIR)" "$(PROFILE_ROOT)"
-	PYTHONPATH=.:src python3 -W error::ResourceWarning scripts/test-profile.py
-	@printf '%s\n' "Retained CPU/allocation evidence: $(PROFILE_DIR)"
+	@set -eu; trap 'rm -rf "$(RUN_DIR)"' EXIT; mkdir -p "$(TMPDIR)"; \
+		PYTHONPATH=.:src python3 -W error::ResourceWarning -m unittest discover -v tests
+
+prerelease-test: init
+	@set -eu; trap 'rm -rf "$(RUN_DIR)" "$(RUN_ROOT)/pre-release/$(RUN_ID)"' EXIT; mkdir -p "$(TMPDIR)"; \
+		PYTHONPATH=.:src python3 -W error::ResourceWarning scripts/test-profile.py
 
 build: init
 	OUT="$(BUILD_ROOT)/calibre-umcp-plugin.zip" sh plugins/build-plugin.sh
