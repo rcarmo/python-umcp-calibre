@@ -8,7 +8,7 @@ This Interface Action plugin runs `umcp.MCPServer` inside the Calibre GUI proces
 make build
 ```
 
-The resulting `plugins/calibre-umcp-plugin.zip` contains the plugin package files (`__init__.py`, `bridge.py`, `config.py`, `mcp.py` and `ui.py`), Calibre's `plugin-import-name-calibre_umcp_plugin.txt` namespace marker, and `umcp.py` plus `umcp_shared.py`. The last two are copied from the canonical runtime under `src/calibre_umcp` during packaging and removed from the plugin source directory afterwards.
+The resulting `<resolved PROJECT_TMP_ROOT>/build/calibre-umcp-plugin.zip` contains the plugin package files (`__init__.py`, `bridge.py`, `config.py`, `mcp.py`, `ui.py` and `task_history.py`), Calibre's `plugin-import-name-calibre_umcp_plugin.txt` namespace marker, and `umcp.py` plus `umcp_shared.py`. The last two are copied from the canonical runtime under `src/calibre_umcp` during packaging and removed from the plugin source directory afterwards.
 
 ## Installing In A Container
 
@@ -20,7 +20,7 @@ s6-setuidgid abc calibre-customize -a plugins/calibre-umcp-plugin.zip
 
 Restart or reload Calibre. The plugin tries to start MCP about a second after initialisation, once it can resolve the active library. If that does not happen -- usually because the bind or token settings still need fixing -- the `µMCP Bridge` menu exposes Status, Configure, Stop and Start actions for a manual retry.
 
-For installations without a checkout, `plugins/install-from-gitea.sh` fetches the seven source files, adds the Calibre namespace marker, builds `<resolved PROJECT_TMP_ROOT>/build/calibre-umcp-plugin.zip` and installs it with `calibre-customize`. Despite the script name, its default `SOURCE_BASE` points at the repository's raw GitHub URL unless you override it.
+For installations without a checkout, `plugins/install-from-gitea.sh` fetches the eight source files, adds the Calibre namespace marker, builds `<resolved PROJECT_TMP_ROOT>/build/calibre-umcp-plugin.zip` and installs it with `calibre-customize`. Despite the script name, its default `SOURCE_BASE` points at the repository's raw GitHub URL unless you override it.
 
 Override `SOURCE_BASE`, `CALIBRE_USER` or `CALIBRE_GROUP` when needed. The script accepts `PROJECT_TMP_BASE` (appending `/calibre-umcp`) and a compatible explicit `PROJECT_TMP_ROOT`; both must agree when supplied. CI falls back through `RUNNER_TEMP`, the original `TMPDIR`, and system temp, while local use prefers `/workspace/tmp` and then system temp. `WORK` and `OUT` may only select paths within the resolved `runs/` and `build/` hierarchy.
 
@@ -48,6 +48,18 @@ The plugin publishes Streamable HTTP at `POST /mcp` and a small unauthenticated 
 `CALIBRE_UMCP_AUDIT_PATH` may point to a redacted JSONL audit file for bridge job records. The UI also stores an in-memory audit retention value between 10 and 10000 records, defaulting to 500. Long-running native work still appears in Calibre's own Jobs UI; `list_bridge_jobs_readonly()` is the bridge ledger.
 
 MCP clients should reconnect and refresh `tools/list` after plugin upgrades whenever `toolset_version` changes; gateways may otherwise retain an older tool catalogue.
+
+## Native Task History
+
+The native task tools observe Calibre's GUI JobManager, including scheduled downloads and automatic email jobs:
+
+- `list_native_tasks_readonly(limit=50, offset=0, status="", query="")` lists retained tasks. The page limit is 200.
+- `get_native_task_readonly(task_id)` returns one task's status and metadata.
+- `get_native_task_log_readonly(task_id, offset=0, limit=4000)` reads a redacted log page. Offsets count Unicode characters; the page limit is 16,000.
+
+GUI signals and a one-second timer capture jobs while the bridge runs. History is retained for 30 days, capped at 2,000 records and 32 KiB of log text per task. Redacted records persist in `calibre-umcp-task-history.sqlite` in Calibre's configuration directory, with mode 0600. Persistence failures leave live history available and report an error in the list response. Tasks still queued or running when Calibre exits become `interrupted` after restart.
+
+Task identifiers are separate from bridge job identifiers. A bridge link requires an explicit object identity match. Completed task status does not establish SMTP acceptance or Kindle delivery. Logs removed before observation cannot be recovered; no book association is inferred from descriptions. Protocol transcript lines, credentials, recipients and paths are redacted before persistence.
 
 ## Attachment Staging
 

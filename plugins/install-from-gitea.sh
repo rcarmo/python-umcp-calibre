@@ -57,7 +57,7 @@ done
 rm -rf "$WORK"
 mkdir -p "$WORK" "$(dirname "$OUT")"
 
-for file in __init__.py bridge.py config.py mcp.py ui.py; do
+for file in __init__.py bridge.py config.py mcp.py ui.py task_history.py; do
   curl -fsSL \
     "$SOURCE_BASE/plugins/calibre_umcp_plugin/$file" \
     -o "$WORK/$file"
@@ -82,6 +82,7 @@ with ZipFile(out, 'w', ZIP_DEFLATED) as zf:
         'config.py',
         'mcp.py',
         'ui.py',
+        'task_history.py',
         'umcp.py',
         'umcp_shared.py',
         'plugin-import-name-calibre_umcp_plugin.txt',

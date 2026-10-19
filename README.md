@@ -2,7 +2,7 @@
 
 Calibre keeps its database, caches and filesystem state in the GUI process. `python-umcp-calibre` runs an MCP server in that process, so clients use Calibre's APIs and job machinery without opening `metadata.db` from a sidecar.
 
-Version 0.3.4 provides the released plugin and an older read-only compatibility server. Mutations are tested against exactly Calibre 9.15.0; the plugin hides them on every other Calibre version.
+Version 0.3.5 adds persistent, redacted native task history, including scheduled downloads and automatic email jobs. It provides the released plugin and an older read-only compatibility server. Mutations are tested against exactly Calibre 9.15.0; the plugin hides them on every other Calibre version.
 
 ## Process boundaries
 
@@ -48,12 +48,17 @@ Start with `capabilities_readonly()`. Read `list_libraries_readonly()` before ch
 | `find_cross_library_duplicates_readonly` | source and target aliases, limits, optional query and cursor | One bounded cross-library comparison segment |
 | `content_server_status_readonly` | None | Authenticated content-server URL when it can be stated unambiguously |
 | `list_scheduled_news_readonly` | None | Enabled or bridge-disabled recipe state, schedule, retained prior schedule, last download and customisation metadata |
+| `list_native_tasks_readonly` | `limit`, `offset`, optional `status`, `query` | Native GUI tasks, pagination and persistence status |
+| `get_native_task_readonly` | `task_id` | One retained native task's metadata and status |
+| `get_native_task_log_readonly` | `task_id`, `offset`, `limit` | Redacted log page with character-based continuation |
 | `list_bridge_jobs_readonly` | None | Bridge audit and job records |
 | `get_bridge_job_status_readonly` | `job_id` | One bridge audit or job record |
 
 EPUB inspection accepts files up to 64 MiB and archives with at most 4,096 entries or 256 MiB of expanded data. It scans no more than 8 MiB of content and runs for at most five seconds. Assessment and comparison convert supported inspection failures into `grade: unknown` results with `inspection_errors`; a direct inspection call returns the corresponding stable error.
 
 Duplicate searches are segmented. Pass `next_cursor` back unchanged with the same arguments until it becomes `null`.
+
+Native task history retains up to 30 days, 2,000 records and 32 KiB of log text per task. Redacted records persist in Calibre's configuration directory. A completed task does not establish SMTP acceptance or Kindle delivery. See [native task history](docs/native-task-history.md) for capture, privacy and validation details.
 
 ## Mutation gate
 

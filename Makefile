@@ -23,7 +23,11 @@ export TEMP := $(TMPDIR)
 export PYTHONPYCACHEPREFIX := $(CACHE_ROOT)/python/pycache
 export PIP_CACHE_DIR := $(CACHE_ROOT)/pip
 
-.PHONY: paths init test prerelease-test build clean
+CALIBRE_RUNTIME_ROOT ?= $(CACHE_ROOT)/calibre-9.15
+CALIBRE_SOURCE_ROOT ?= $(CACHE_ROOT)/source/calibre-9.15.0/src
+export CALIBRE_RUNTIME_ROOT CALIBRE_SOURCE_ROOT
+
+.PHONY: paths init test prerelease-test runtime-test build clean
 
 paths:
 	@scripts/project-tmp.sh paths
@@ -39,6 +43,13 @@ test: init
 prerelease-test: init
 	@set -eu; trap 'rm -rf "$(RUN_DIR)" "$(RUN_ROOT)/pre-release/$(RUN_ID)"' EXIT; mkdir -p "$(TMPDIR)"; \
 		PYTHONPATH=.:src python3 -W error::ResourceWarning scripts/test-profile.py
+
+runtime-test: init
+	@set -eu; trap 'rm -rf "$(RUN_DIR)"' EXIT; mkdir -p "$(TMPDIR)" "$(RUN_DIR)/calibre-config"; \
+		export CALIBRE_CONFIG_DIRECTORY="$(RUN_DIR)/calibre-config" QT_QPA_PLATFORM=offscreen; \
+		"$(CALIBRE_RUNTIME_ROOT)/calibre-debug" -e tests/calibre_9_15_native_history_integration.py; \
+		"$(CALIBRE_RUNTIME_ROOT)/calibre-debug" -e tests/calibre_9_15_runtime_integration.py; \
+		sh tests/calibre_9_15_content_server_integration.sh
 
 build: init
 	OUT="$(BUILD_ROOT)/calibre-umcp-plugin.zip" sh plugins/build-plugin.sh

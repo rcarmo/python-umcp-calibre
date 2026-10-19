@@ -2,7 +2,9 @@
 # Run against an unpacked Calibre 9.15.0 bundle.
 set -eu
 : "${CALIBRE_RUNTIME_ROOT:?Set CALIBRE_RUNTIME_ROOT to Calibre 9.15.0}"
-ROOT="$(mktemp -d -p "${CALIBRE_RUNTIME_WORK_ROOT:-/tmp}" -t calibre-umcp-content-XXXXXX)"
+WORK_BASE=${CALIBRE_RUNTIME_WORK_ROOT:-${TMPDIR:-$(scripts/project-tmp.sh root)/tests}}
+mkdir -p "$WORK_BASE"
+ROOT="$(mktemp -d -p "$WORK_BASE" -t calibre-umcp-content-XXXXXX)"
 PID=
 cleanup() {
     if [ -n "$PID" ]; then kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; fi

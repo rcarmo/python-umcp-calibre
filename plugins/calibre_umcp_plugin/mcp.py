@@ -230,6 +230,18 @@ class CalibrePluginMCPServer(MCPServer):
             "find_cross_library_duplicates_readonly": {"arguments": {"source_library": "configured alias", "target_libraries": "one to sixteen configured aliases", "source_query": "optional Calibre query", "limit": "source chunk, default 5, max 25", "target_limit": "target chunk, default 100, max 250", "candidate_limit_per_book": "default 20, max 100", "cursor": "opaque continuation"}, "returns": "one bounded target segment, progress fields, partial matches and next_cursor"},
             "content_server_status_readonly": {"arguments": {}, "returns": "running/auth status and a base URL only for authenticated concrete binds"},
             "list_scheduled_news_readonly": {"arguments": {}, "returns": "configured and bridge-disabled builtin:/custom: recipes with enabled state, schedule, retained prior schedule, last-download and retention metadata; never account credentials"},
+            "list_native_tasks_readonly": {
+                "arguments": {"limit": "1–200 records", "offset": "non-negative record offset", "status": "optional queued/running/completed/failed/cancelled/interrupted filter", "query": "optional description/name substring"},
+                "returns": "redacted native tasks, pagination and persistence status; retained for 30 days with a 2000-record cap",
+            },
+            "get_native_task_readonly": {
+                "arguments": {"task_id": "opaque id from list_native_tasks_readonly"},
+                "returns": "retained native task metadata; completion does not establish email delivery",
+            },
+            "get_native_task_log_readonly": {
+                "arguments": {"task_id": "opaque retained native task id", "offset": "Unicode character offset", "limit": "1–16000 Unicode characters"},
+                "returns": "redacted log page with next_offset; retained logs capped at 32 KiB",
+            },
             "list_bridge_jobs_readonly": {"arguments": {}},
             "get_bridge_job_status_readonly": {"arguments": {"job_id": "bridge audit id"}},
         }
@@ -426,6 +438,27 @@ class CalibrePluginMCPServer(MCPServer):
     def tool_list_scheduled_news_readonly(self) -> dict[str, Any]:
         """List configured scheduled news recipes without exposing account credentials or recipe source."""
         return self._call_read("list_scheduled_news", {})
+
+    def tool_list_native_tasks_readonly(
+        self, limit: int = 50, offset: int = 0, status: str = "",
+        query: str = "",
+    ) -> dict[str, Any]:
+        """List native GUI tasks, including scheduled downloads/emails; retain 30 days, at most 2000 tasks."""
+        return self._call_read("list_native_tasks", {
+            "limit": limit, "offset": offset, "status": status, "query": query,
+        })
+
+    def tool_get_native_task_readonly(self, task_id: str) -> dict[str, Any]:
+        """Read retained native task status. Success alone does not confirm email delivery."""
+        return self._call_read("get_native_task", {"task_id": task_id})
+
+    def tool_get_native_task_log_readonly(
+        self, task_id: str, offset: int = 0, limit: int = 4000,
+    ) -> dict[str, Any]:
+        """Read a redacted native log page; offsets count Unicode characters, logs capped at 32 KiB."""
+        return self._call_read("get_native_task_log", {
+            "task_id": task_id, "offset": offset, "limit": limit,
+        })
 
     def tool_list_bridge_jobs_readonly(self) -> dict[str, Any]:
         """List bridge audit records."""

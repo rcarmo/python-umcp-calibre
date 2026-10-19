@@ -29,6 +29,9 @@ class CalibreUmcpAction(InterfaceAction):
         self._server = None
         self._endpoint = None
         self._auth_enabled = False
+        self._task_timer = QTimer(self.gui)
+        self._task_timer.setInterval(1000)
+        self._task_timer.timeout.connect(self._capture_native_tasks)
 
         self.menu = QMenu(self.gui)
         self.start_action = QAction("Start bridge", self.gui)
@@ -78,6 +81,13 @@ class CalibreUmcpAction(InterfaceAction):
         try:
             self._server = serve_mcp(self.gui, settings=settings)
             self._endpoint = f"http://{settings.host}:{settings.port}/mcp"
+            self._capture_native_tasks()
+            manager = getattr(self.gui, "job_manager", None)
+            for name in ("job_added", "job_done"):
+                signal = getattr(manager, name, None)
+                if signal is not None:
+                    signal.connect(self._capture_native_tasks)
+            self._task_timer.start()
         except Exception as exc:
             self._server = None
             self._endpoint = None
@@ -197,11 +207,26 @@ class CalibreUmcpAction(InterfaceAction):
             show=True,
         )
 
+    def _capture_native_tasks(self, *args):
+        if self._server is not None:
+            bridge = getattr(self._server, "bridge", None)
+            if bridge is not None:
+                bridge.capture_native_tasks()
+
     def stop_bridge(self, checked=False, notify=True):
         if self._server is None:
             self._refresh_actions()
             return
         server = self._server
+        self._task_timer.stop()
+        manager = getattr(self.gui, "job_manager", None)
+        for name in ("job_added", "job_done"):
+            signal = getattr(manager, name, None)
+            if signal is not None:
+                try:
+                    signal.disconnect(self._capture_native_tasks)
+                except (TypeError, RuntimeError):
+                    pass
         try:
             server.shutdown()
             server.server_close()

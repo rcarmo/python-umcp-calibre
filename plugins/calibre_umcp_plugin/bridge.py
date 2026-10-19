@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 
 BRIDGE_VERSION = PLUGIN_VERSION_STRING
 SCHEMA_VERSION = 2
-TOOLSET_VERSION = 9
+TOOLSET_VERSION = 10
 SUPPORTED_CALIBRE_MUTATION_VERSION = (9, 15, 0)
 MAX_MUTATION_BATCH = 100
 SUPPORTED_STAGED_IMPORT_FORMATS = frozenset({"AZW3", "CBR", "CBZ", "DOCX", "EPUB", "FB2", "HTML", "KEPUB", "MOBI", "ODT", "PDF", "PRC", "RTF", "TXT"})
@@ -136,6 +136,7 @@ class CalibreRpcBridge:
         scheduled_news_queue_adapter=None,
         scheduled_news_disabled=(),
         scheduled_news_disabled_save_adapter=None,
+        task_history_path=None,
     ):
         self.gui = gui
         self.token = token
@@ -177,6 +178,15 @@ class CalibreRpcBridge:
         self._cancelled_before_start: set[str] = set()
         self._records_lock = threading.RLock()
         self._closed = False
+        from .task_history import TaskHistory
+        if task_history_path is None:
+            try:
+                from calibre.constants import config_dir
+                task_history_path = str(Path(config_dir) / "calibre-umcp-task-history.sqlite")
+            except ImportError:
+                pass
+        self._refresh_task_redaction_secrets()
+        self.task_history = TaskHistory(task_history_path, self._redact_native_text)
         self._gui_dispatch = gui_dispatch or self._create_gui_dispatcher()
         self.worker = threading.Thread(target=self._worker, name="calibre-umcp-worker", daemon=True)
         self.worker.start()
@@ -236,9 +246,81 @@ class CalibreRpcBridge:
                         self._update_job(job_id, message="Cancellation requested during bridge shutdown")
                 except Exception as exc:
                     self._update_job(job_id, message="Bridge shutdown could not cancel native job", error=str(exc))
+        self.capture_native_tasks()
+        self.task_history.close()
         self.jobs.put(None)
         if threading.current_thread() is not self.worker:
             self.worker.join(timeout=2)
+
+    def _refresh_task_redaction_secrets(self):
+        # Snapshot once per GUI observation, not once per field/log redaction.
+        secrets = {self.token} if self.token else set()
+        self._task_redaction_available = True
+        try:
+            from calibre.utils.smtp import config as smtp_config
+        except ImportError:  # Source-tree tests have no Calibre configuration.
+            pass
+        else:
+            try:
+                opts = smtp_config().parse()
+                for key in ("relay_password", "relay_username", "relay_host"):
+                    text = getattr(opts, key, None)
+                    if isinstance(text, str) and text:
+                        secrets.add(text)
+                        if key == "relay_password":
+                            decoded = bytes.fromhex(text).decode("utf-8")
+                            if decoded:
+                                secrets.add(decoded)
+                                secrets.add(base64.b64encode(decoded.encode()).decode())
+            except Exception:
+                self._task_redaction_available = False
+        snapshot = tuple(sorted(secrets, key=len, reverse=True))
+        fingerprint = (snapshot, self._task_redaction_available)
+        if getattr(self, "_task_redaction_fingerprint", None) != fingerprint:
+            if hasattr(self, "task_history"):
+                self.task_history.invalidate_redaction_cache()
+        self._task_redaction_fingerprint = fingerprint
+        self._task_redaction_secrets = snapshot
+
+    def _redact_native_text(self, value):
+        if not self._task_redaction_available:
+            return "<redacted>"
+        # SMTP debug transcripts can contain base64 credentials or message bodies.
+        # Suppress protocol lines entirely, not merely the visible AUTH command.
+        value = re.sub(r"(?im)^.*(?:send:|reply:|AUTH\s|SMTPUTF8).*$", "<smtp-protocol-redacted>", value)
+        value = re.sub(r"(?im)^.*(?:password|passwd|secret|token)[\"']?\s*[:=].*$", "<credential-redacted>", value)
+        for secret in self._task_redaction_secrets:
+            value = value.replace(secret, "<redacted>")
+        return self._redact_public_text(value)
+
+    def capture_native_tasks(self):
+        """Observe JobManager on the GUI thread without changing native tasks."""
+        manager = getattr(self.gui, "job_manager", None)
+        jobs = getattr(manager, "jobs", ())
+        self._refresh_task_redaction_secrets()
+        # JobManager sorts active tasks first, then newest completed tasks.
+        # Do not resurrect old completed jobs which still exist in the GUI.
+        cutoff = time.time() - self.task_history.retention_days * 86400
+        snapshot = []
+        for job in jobs[:self.task_history.max_records]:
+            start, duration = getattr(job, "start_time", None), getattr(job, "duration", None)
+            if type(start) in (int, float) and type(duration) in (int, float) and start + duration < cutoff:
+                continue
+            snapshot.append(job)
+        self.task_history.observe(tuple(snapshot), dict(self.calibre_jobs))
+
+    def _native_tasks(self, method, params):
+        self.capture_native_tasks()
+        try:
+            if method == "list_native_tasks":
+                return self.task_history.list(**params)
+            if method == "get_native_task":
+                return self.task_history.get(**params)
+            return self.task_history.log(**params)
+        except (ValueError, TypeError) as exc:
+            raise BridgeMethodError("INVALID_PARAMS", str(exc)) from exc
+        except KeyError as exc:
+            raise BridgeMethodError("TASK_NOT_FOUND", "Native task is not retained") from exc
 
     def dispatch(self, method: str, params: dict[str, Any]) -> Any:
         if method in {
@@ -247,6 +329,8 @@ class CalibreRpcBridge:
             "copy_books_to_library", "move_books_to_library", "save_book_to_disk", "email_book",
         }:
             self._require_active_guards(params)
+        if method in {"list_native_tasks", "get_native_task", "get_native_task_log"}:
+            return self._native_tasks(method, params)
         if method == "ping":
             return {"ok": True, "version": BRIDGE_VERSION, "active_library": self._active_alias()}
         if method == "list_libraries":

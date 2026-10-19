@@ -83,7 +83,7 @@ class PluginMCPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "calibre-umcp")
         self.assertEqual(initialized["result"]["serverInfo"]["schemaVersion"], "2")
-        self.assertEqual(initialized["result"]["serverInfo"]["toolsetVersion"], "9")
+        self.assertEqual(initialized["result"]["serverInfo"]["toolsetVersion"], "10")
         self.assertEqual(initialized["result"]["capabilities"], {"tools": {"listChanged": False}})
 
         _, listed = self.post(base, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
@@ -91,6 +91,8 @@ class PluginMCPTests(unittest.TestCase):
         self.assertIn("capabilities_readonly", tools)
         self.assertIn("search_books_readonly", tools)
         self.assertIn("get_book_formats_readonly", tools)
+        for name in ("list_native_tasks_readonly", "get_native_task_readonly", "get_native_task_log_readonly"):
+            self.assertIn(name, tools)
         self.assertIn("inspect_book_format_readonly", tools)
         self.assertIn("assess_book_quality_readonly", tools)
         self.assertIn("compare_book_quality_readonly", tools)
@@ -120,7 +122,7 @@ class PluginMCPTests(unittest.TestCase):
         )
         content = capabilities["result"]["structuredContent"]
         self.assertEqual(content["schema_version"], 2)
-        self.assertEqual(content["toolset_version"], 9)
+        self.assertEqual(content["toolset_version"], 10)
         self.assertFalse(content["cross_library_configured"])
         self.assertFalse(content["cross_library_available"])
         self.assertEqual(content["readable_target_count"], 0)
